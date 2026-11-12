@@ -1,0 +1,11 @@
+{
+	"id": "super-csv-editor",
+	"name": "Super CSV Editor",
+	"version": "0.0.1",
+	"minAppVersion": "1.6.6",
+	"description": "Edit CSV files in a spreadsheet grid with fast cell editing and keyboard navigation.",
+	"author": "@SuperSkypper",
+	"authorUrl": "https://x.com/SuperSkypper",
+	"fundingUrl": "https://ko-fi.com/superskypper",
+	"isDesktopOnly": false
+}

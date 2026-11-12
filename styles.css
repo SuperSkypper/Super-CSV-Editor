@@ -1,0 +1,787 @@
+.super-csv-editor-container {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	padding: 0;
+	overflow: hidden;
+	/* Anchors the absolutely positioned column ghost and drop indicator. */
+	position: relative;
+}
+
+/* It holds keyboard focus so Ctrl+C/X/V reach the grid; no visible ring. */
+.super-csv-editor-container:focus {
+	outline: none;
+}
+
+.super-csv-editor-scroll {
+	flex: 1 1 auto;
+	overflow: auto;
+	/*
+	 * A flex item defaults to min-width:auto, so it refuses to shrink below its
+	 * content. The table's width:100% resolves against this box, and the
+	 * automatic last <col> makes the content grow — without min-width:0 the
+	 * two feed each other and the table overflows the view. min-width:0 lets the
+	 * scroll box stay at the window width, so the leftover the user asked for
+	 * lands in the last column and nowhere else.
+	 */
+	min-width: 0;
+}
+
+/*
+ * A real table with a fixed layout: the browser resolves one width per column,
+ * so the header and every data row stay in step by construction. A stack of
+ * per-row CSS grids cannot guarantee that.
+ */
+.super-csv-editor-grid {
+	width: 100%;
+	border-collapse: separate;
+	border-spacing: 0;
+	table-layout: fixed;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	line-height: 1.4;
+}
+
+.super-csv-editor-cell {
+	/* Anchors the absolutely positioned cell editor and the resize handle. */
+	position: relative;
+	padding: 4px 10px;
+	border-right: 1px solid var(--background-modifier-border);
+	border-bottom: 1px solid var(--background-modifier-border);
+	text-align: left;
+	vertical-align: top;
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	cursor: cell;
+	user-select: none;
+}
+
+/* Boolean cells render as a checkbox instead of the raw text. */
+.super-csv-editor-cell input.super-csv-editor-checkbox {
+	margin: 0 auto;
+	display: block;
+	cursor: pointer;
+}
+.super-csv-editor-cell.is-empty {
+	min-width: 40px;
+	height: calc(1.4em + 9px);
+}
+
+.super-csv-editor-row.is-ragged {
+	background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
+}
+
+/*
+ * The row-number gutter. It is presentation only: the numbers are never part of
+ * the CSV, and the cells carry no data-row/data-col, so selection, editing and
+ * the clipboard skip them.
+ *
+ * `position: sticky` with `left: 0` keeps the numbers on screen while the grid
+ * scrolls horizontally past them, which is the whole point of a gutter: the row
+ * you are reading must stay identifiable.
+ */
+/*
+ * The gutter must not be shrunk when the grid is squeezed into the pane.
+ *
+ * With `table-layout: fixed` and a `max-width` on the table, a grid wider than
+ * its box gets its columns compressed proportionally — the gutter included, so
+ * the row numbers were being crushed to half their width. `min-width` is the
+ * floor the compression cannot cross, and `box-sizing` keeps the 46px meaning
+ * the same thing here as it does in the `<col>`.
+ */
+.super-csv-editor-cell.is-gutter-cell {
+	position: sticky;
+	left: 0;
+	z-index: 1;
+	box-sizing: border-box;
+	min-width: 46px;
+	text-align: right;
+	padding: 4px 8px;
+	color: var(--text-faint);
+	background-color: var(--background-secondary);
+	cursor: default;
+	user-select: none;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+/* The corner above the gutter must outrank both the header and the gutter. */
+.super-csv-editor-cell.is-gutter-cell.is-header-cell {
+	z-index: 3;
+	/* Keep the gutter's right alignment. The header-cell rule below sets
+	 * `text-align: left` for column titles, and this element carries BOTH
+	 * classes — so without this the row number "0" rendered flush left while
+	 * every body number sat flush right, 23px apart. */
+	text-align: right;
+}
+
+.super-csv-editor-row.is-header {
+	position: -webkit-sticky;
+	position: sticky;
+	top: 0;
+	z-index: 2;
+}
+
+/*
+ * Header cells must be OPAQUE. The header row is sticky, so the data rows
+ * scroll underneath it — with a transparent background the first row's text
+ * shows through the header and neither is readable.
+ *
+ * The background belongs on `is-header-cell`, which is the class the code
+ * actually applies. An earlier `.super-csv-editor-header-cell` rule carried the
+ * colour but was never used by any element, so the header rendered transparent.
+ */
+.super-csv-editor-cell.is-header-cell {
+	background-color: var(--background-secondary);
+	font-weight: var(--font-semibold);
+	text-align: left;
+	cursor: grab;
+}
+
+/*
+ * A grab strip on the right edge of each header cell. It sits above the cell
+ * content so the drag wins over text selection, and only lights up on hover so
+ * it does not compete with the data.
+ */
+.super-csv-editor-resizer {
+	position: absolute;
+	top: 0;
+	right: 0;
+	width: 7px;
+	height: 100%;
+	cursor: col-resize;
+	user-select: none;
+	z-index: 5;
+	background-color: transparent;
+	transition: background-color 100ms ease-in-out;
+}
+
+.super-csv-editor-resizer:hover,
+.super-csv-editor-resizer.is-dragging {
+	background-color: var(--interactive-accent);
+}
+
+/* No text selection or I-beam while a column is being dragged. */
+body.super-csv-editor-resizing {
+	cursor: col-resize;
+	user-select: none;
+}
+
+/* Column being dragged sideways. Follows the pointer and floats above the table. */
+body.super-csv-editor-col-dragging {
+	cursor: grabbing;
+	user-select: none;
+}
+
+.super-csv-editor-col-ghost {
+	position: absolute;
+	z-index: 20;
+	pointer-events: none;
+	opacity: 0.85;
+	background-color: var(--background-secondary);
+	box-shadow: var(--shadow-s);
+	font-weight: var(--font-semibold);
+}
+
+/* A vertical bar over the header cell the column will land on. */
+.super-csv-editor-col-drop-indicator {
+	position: absolute;
+	top: 0;
+	right: -2px;
+	width: 3px;
+	height: 100%;
+	background-color: var(--interactive-accent);
+	z-index: 15;
+	pointer-events: none;
+}
+
+/* Headers signal they are draggable, but only on hover so the grid stays calm. */
+.super-csv-editor-cell.is-header-cell {
+	cursor: grab;
+}
+
+.super-csv-editor-cell.is-header-cell:active {
+	cursor: grabbing;
+}
+
+/*
+ * A wikilink inside a cell. The link is display-only DOM: the CSV on disk still
+ * holds the raw [[target|alias]] text.
+ */
+.super-csv-editor-wikilink {
+	color: var(--link-color);
+	text-decoration: none;
+	cursor: pointer;
+}
+
+.super-csv-editor-wikilink:hover {
+	text-decoration: underline;
+}
+
+/*
+ * A wikilink whose target is not in the vault, styled to match how Obsidian
+ * renders one in a note: the theme's unresolved colour plus a dotted underline.
+ * The variables carry theme fallbacks, so a theme that does not define them
+ * still gets a readable grey rather than the resolved link colour.
+ */
+.super-csv-editor-wikilink.is-unresolved {
+	color: var(--link-unresolved-color, var(--text-muted));
+	text-decoration: underline;
+	text-decoration-style: dotted;
+	text-decoration-color: var(--link-unresolved-decoration-color, var(--text-faint));
+}
+
+.super-csv-editor-wikilink.is-unresolved:hover {
+	text-decoration-style: solid;
+}
+
+/*
+ * Off-screen host for measuring real column widths. It must not affect what the
+ * user sees, and it must not constrain the probe: the probe <td> is a real cell
+ * of the real grid class, so the browser includes padding, borders and font.
+ */
+.super-csv-editor-measure {
+	position: absolute;
+	top: 0;
+	left: -100000px;
+	visibility: hidden;
+	pointer-events: none;
+	height: 0;
+	overflow: hidden;
+	white-space: pre;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	line-height: 1.4;
+}
+
+/*
+ * The probe table must grow to fit its single cell; otherwise table-layout: fixed
+ * divides the available width instead of asking how wide the text actually is.
+ */
+.super-csv-editor-measure .super-csv-editor-grid {
+	width: max-content;
+}
+
+.super-csv-editor-cell.is-selected {
+	background-color: var(--background-modifier-hover);
+}
+
+.super-csv-editor-cell.is-focused {
+	outline: 2px solid var(--interactive-accent);
+	/*
+	 * -2px, NOT 0: a positive or zero offset paints the ring OUTSIDE the cell,
+	 * on top of the neighbouring cell and the grid line (verified by reading the
+	 * rendered pixels — offset 0 drew at x=8..91 for a cell at 10..90). At -2px
+	 * the ring lands inside the cell's own edges, so the column borders stay
+	 * visible beside it.
+	 */
+	outline-offset: -2px;
+	background-color: var(--background-modifier-hover);
+}
+
+/*
+ * Search filters the sheet rather than highlighting hits (the Bases model), so
+ * a row the query does not match is hidden. It stays in the DOM — its cells
+ * keep their real data-row — so editing, selection and the clipboard keep
+ * addressing the true file lines when the filter is cleared.
+ */
+.super-csv-editor-row.is-filtered-out {
+	display: none;
+}
+
+/*
+ * The editor is a child of the cell, absolutely positioned to cover it exactly.
+ * It never opens as a separate window and never shifts the table around.
+ */
+.super-csv-editor-cell-editor {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	min-height: 100%;
+	/* The embed container sets user-select:none so a drag cannot grab the
+	   surrounding wikilink; a real input must override that or text inside it
+	   cannot be selected with the mouse. */
+	user-select: text;
+	-webkit-user-select: text;
+	/* Grow to fit the typed content without JS measuring, so the editor stays
+	   flush against the cell instead of floating like a separate window. */
+	field-sizing: content;
+	min-width: max(100%, 24ch);
+	max-width: min(90vw, 80ch);
+	margin: 0;
+	padding: 4px 10px;
+	border: 2px solid var(--interactive-accent);
+	border-radius: 0;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-family: inherit;
+	font-size: inherit;
+	line-height: inherit;
+	resize: none;
+	overflow: hidden;
+	white-space: pre;
+	box-shadow: var(--shadow-s);
+	z-index: 4;
+}
+
+/* position: relative on the cell is what anchors the editor above. */
+.super-csv-editor-cell.is-editing {
+	position: relative;
+	overflow: visible;
+	z-index: 3;
+}
+
+.super-csv-editor-cell-editor:focus {
+	outline: none;
+}
+
+/*
+ * The wrapper shrink-wraps the table, so it is exactly as wide as the grid while
+ * the table can still overflow horizontally inside it. It is the positioning
+ * context for the two add affordances that live outside the table.
+ */
+.super-csv-editor-grid-wrap {
+	/*
+	 * Positioning context for the ghost column's "+", which must sit on the table's
+	 * right edge. It is a plain block (NOT max-content): a table with width:100%
+	 * inside a max-content parent feeds the percentage back into the sizing
+	 * calculation and the layout blows up to a million pixels. The "+" tracks the
+	 * edge because it is absolutely positioned against this box, which already
+	 * spans the table's full width.
+	 */
+	position: relative;
+	display: block;
+}
+
+/*
+ * "+ New row" is a bar under the LAST ROW, inside the scroll area, so it hugs
+ * the table's end and scrolls with it. It was previously a child of the flex
+ * container, which made it a footer pinned to the bottom of the pane.
+ *
+ * Its width is set in JS (anchorAddRow) to the grid's CONTENT width, so the bar
+ * ends at the last column instead of stretching across the whole pane — a
+ * pane-wide strip past the final column reads as oversized. `text-align: left`
+ * keeps the label at the start of that width; the bar already sits flush with
+ * the table's left edge, so a centred label drifted away from the table.
+ */
+.super-csv-editor-add-row {
+	box-sizing: border-box;
+	padding: 6px 12px;
+	cursor: pointer;
+	color: var(--text-muted);
+	background-color: transparent;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	text-align: left;
+	border: 1px solid var(--background-modifier-border);
+	border-top: none;
+	border-radius: 0 0 var(--radius-s) var(--radius-s);
+}
+
+.super-csv-editor-add-row:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/*
+ * "+ new column" for the ghost slot. It sits over the ghost column and spans
+ * the grid's full height, so it is clickable along the whole column instead of
+ * only on the header cell.
+ *
+ * The label reads VERTICALLY. `writing-mode: vertical-rl` rotates the whole
+ * line, so the glyphs stay upright and legible (rotating each character would
+ * tip them onto its side). The label is one text node for the same reason.
+ *
+ * Centring matters here: anchored to the top with a padding, the 68px-tall
+ * label was clipped by the grid's own overflow on a SHORT grid (one or two
+ * rows), which is exactly the case a fresh file hits. Centring keeps it whole
+ * for any grid taller than the label and evenly cropped, never half-drawn by a
+ * padding offset.
+ *
+ * `right` is deliberately absent: the wrapper is a block whose right edge is the
+ * panel's, not the table's, so anchoring to it parked the label over the
+ * second-to-last column of any table wider than the panel. The strip's `left` is
+ * pinned to the ghost cell in JS instead (see GridController.anchorAddColumn),
+ * and RE-pinned on every scroll event — a one-shot read froze the offset in
+ * content coordinates, so the strip slid off the left edge while the columns
+ * moved away from it.
+ */
+.super-csv-editor-add-col {
+	position: absolute;
+	top: 0;
+	width: 34px;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	color: var(--text-muted);
+	background-color: transparent;
+	font-weight: var(--font-semibold);
+	font-size: var(--font-ui-smaller);
+	/* Reads top-to-bottom with the glyphs upright, like a column header label. */
+	writing-mode: vertical-rl;
+	letter-spacing: 0.02em;
+	white-space: nowrap;
+	overflow: hidden;
+	/* A short grid cannot fit the label; cropping it evenly beats a lopsided
+	   clip from the top, and the full label is still there on any taller grid. */
+	padding: 4px 0;
+	box-sizing: border-box;
+}
+
+.super-csv-editor-add-col:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/*
+ * The ghost slot the "+" is drawn in. It is an EMPTY slot: the strip above it
+ * provides the only affordance, so this cell must paint nothing. It still
+ * inherits the grid's `border-right` / `border-bottom`, which drew a full empty
+ * gridded column after the last one — the "lines" the user sees past the data.
+ * A borderless, backgroundless box keeps the band (the "+" needs the space)
+ * without drawing anything.
+ */
+.super-csv-editor-cell.is-ghost-col {
+	border: none;
+	background-color: transparent;
+	cursor: default;
+}
+
+/*
+ * The slack filler that closes every row. It takes the width left over on
+ * screen so that width is not shared between the real columns: without it the
+ * row-number gutter grew to a quarter of the pane and its numbers drifted away
+ * from the left edge. It draws nothing — no borders, no background.
+ */
+.super-csv-editor-cell.is-spacer {
+	border: none;
+	background-color: transparent;
+	cursor: default;
+}
+
+
+/* A `![[file.csv]]` embed renders as a table inside the note. Capped height
+ * with its own scroll so a large CSV does not push the rest of the note away. */
+/*
+ * An embedded CSV runs the same GridController as the full view, so it needs
+ * the same affordances: column resizing, drag, editing and a status line. The
+ * container's `height: 100%` is overridden because inside a note the grid is
+ * bounded by a max-height instead of by the viewport.
+ */
+.super-csv-editor-embed {
+	max-height: 400px;
+	box-sizing: border-box;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	margin: 8px 0;
+	overflow: hidden;
+}
+
+/*
+ * The embed must SHRINK-WRAP its table, so the box ends at the last column
+ * instead of running to the edge of the note. That means `inline-flex` (the
+ * base `.super-csv-editor-container` rule sets `display: flex`, which would
+ * stretch it) plus `width: max-content` capped at the available width.
+ *
+ * This only works because an embed renders NO slack filler: the filler claims
+ * all leftover space, so a table with one can never be narrower than its
+ * parent. `GridController.fillSlack` is what leaves it out.
+ */
+.super-csv-editor-embed.super-csv-editor-container {
+	height: auto;
+	display: inline-flex;
+	width: max-content;
+	max-width: 100%;
+	/*
+	 * On the container itself, not just its children: the border and padding
+	 * ring is still inside the `![[file.csv]]` anchor, and a drag started there
+	 * extended the note's selection onto the link text. Children that need it
+	 * (the inline editor) re-enable selection on themselves.
+	 */
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.super-csv-editor-embed .super-csv-editor-scroll {
+	flex: 0 1 auto;
+	overflow: auto;
+	max-height: 360px;
+}
+
+/*
+ * The table takes its columns' natural width (they carry explicit px widths),
+ * so the wrapper — and therefore the embed box — stops at the last column. The
+ * `max-width` keeps a grid wider than the note scrolling instead of overflowing
+ * it, and the wrapper must stay a plain block: `width: 100%` on the table inside
+ * a `max-content` parent feeds the percentage back into its own sizing.
+ */
+.super-csv-editor-embed .super-csv-editor-grid {
+	width: max-content;
+	max-width: 100%;
+}
+
+/*
+ * The whole embed, not just the table: cell text is display-only, and the add
+ * strips and status bar sit OUTSIDE the <table>. Dragging from any of them
+ * still let the note's own text selection start, which grabbed the surrounding
+ * `![[file.csv]]` link. The inline editor is a real <textarea> and keeps its
+ * own selection behaviour.
+ */
+.super-csv-editor-embed .super-csv-editor-scroll,
+.super-csv-editor-embed .super-csv-editor-add-row,
+.super-csv-editor-embed .super-csv-editor-add-col,
+.super-csv-editor-embed .super-csv-editor-status {
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+
+.super-csv-editor-status {
+	flex: 0 0 auto;
+	padding: 4px 12px;
+	border-top: 1px solid var(--background-modifier-border);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/*
+ * The `[[` autocomplete list. It lives in document.body rather than inside the
+ * cell, because a cell clips its overflow and would cut the popover off at the
+ * first row.
+ */
+/*
+ * The `[[` popover, styled to match Obsidian's own suggestion list.
+ *
+ * The markup and the tokens deliberately mirror the native `.suggestion-container`
+ * / `.suggestion-item` / `.is-selected` pattern: every colour comes from a
+ * Obsidian CSS variable, so the popover follows the user's theme, font and
+ * radius instead of restating them. The differences are structural only — a
+ * plain <textarea> cannot host an EditorSuggest, so this is a positioned div.
+ */
+.super-csv-editor-suggest {
+	position: fixed;
+	z-index: var(--layer-menu, 100);
+	max-height: 260px;
+	overflow-y: auto;
+	padding: 4px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	box-shadow: var(--shadow-s);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	text-align: left;
+}
+
+.super-csv-editor-suggest-item {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	padding: 4px 8px;
+	border-radius: var(--radius-s);
+	cursor: default;
+}
+
+/* Same highlight the native list uses, so the eye treats them as one widget. */
+.super-csv-editor-suggest-item.is-active {
+	background-color: var(--background-modifier-hover);
+}
+
+.super-csv-editor-suggest-name {
+	color: var(--text-normal);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.super-csv-editor-suggest-note {
+	display: flex;
+	min-width: 0;
+}
+
+.super-csv-editor-suggest-path {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+/*
+ * The open-CSV window splits into the grid and a links panel.
+ *
+ * The split lives on the view's contentEl, not on the grid's own container:
+ * render() empties the grid's container on every edit, so the panel has to sit
+ * outside it or it would vanish on the first keystroke.
+ */
+.super-csv-editor-window {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	overflow: hidden;
+}
+
+.super-csv-editor-window-main {
+	/* The grid takes the room; the panel gets only what it needs. */
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/*
+ * The editable file title above the grid, mirroring a note's inline title:
+ * click to rename, Enter or click-away to commit. It deliberately does NOT
+ * inherit the big `--inline-title-size` (1.5em+): a note's title is the page's
+ * subject, but here it is just a label on a spreadsheet's tab, so it is kept
+ * small — the grid, not the name, is the content.
+ */
+.super-csv-editor-title {
+	flex: 0 0 auto;
+	padding: 5px 14px 1px;
+	font-size: var(--font-ui-smaller, 0.8em);
+	font-weight: var(--font-normal, 400);
+	line-height: 1.3;
+	color: var(--text-faint);
+	white-space: pre;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	cursor: text;
+}
+
+.super-csv-editor-title:hover,
+.super-csv-editor-title:focus {
+	color: var(--text-normal);
+}
+
+.super-csv-editor-title:focus {
+	outline: none;
+}
+
+/*
+ * The Bases-style toolbar between the title and the grid: the Search control
+ * sits on the LEFT, where a view's primary action belongs. The button keeps
+ * the native `clickable-icon` look and hover, and only widens to fit its label.
+ */
+.super-csv-editor-toolbar {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 8px;
+	padding: 0 8px 4px 8px;
+	min-height: 24px;
+}
+
+.super-csv-editor-search-button {
+	width: auto;
+	height: auto;
+	gap: 5px;
+	padding: 3px 8px 3px 4px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.super-csv-editor-search-button .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.super-csv-editor-search-button-label {
+	line-height: 1;
+}
+
+/*
+ * The search row revealed by the button (or Ctrl/Cmd+F). Full-width, like
+ * Bases' "Find...", so the query reads as a filter over the whole sheet.
+ */
+.super-csv-editor-search {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0 8px 6px 12px;
+}
+
+.super-csv-editor-search.is-hidden {
+	display: none;
+}
+
+.super-csv-editor-search-icon {
+	display: flex;
+	align-items: center;
+	color: var(--text-faint);
+}
+
+.super-csv-editor-search-icon svg {
+	width: 15px;
+	height: 15px;
+}
+
+.super-csv-editor-search-input {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.super-csv-editor-search-count {
+	flex: 0 0 auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.super-csv-editor-links {
+	/* Sits below the grid, above the bottom edge, and never grows with the
+	 * vault — the list scrolls instead, so a busy CSV cannot push the table
+	 * off screen. */
+	flex: 0 0 auto;
+	max-height: 30%;
+	overflow: auto;
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	font-size: var(--font-ui-smaller);
+}
+
+.super-csv-editor-links-host {
+	padding: 6px 10px 8px;
+}
+
+.super-csv-editor-links-empty {
+	color: var(--text-faint);
+	padding: 2px 0 4px;
+}
+
+/* The single heading, worded like the pane Obsidian itself uses. */
+.super-csv-editor-links-heading {
+	margin: 0 0 2px;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+/* One flat list under that heading: no per-direction labels. */
+.super-csv-editor-links-host > ul {
+	margin: 0;
+	padding: 0 0 0 14px;
+	list-style: disc;
+}
+
+.super-csv-editor-links-host > ul > li {
+	margin: 1px 0;
+	line-height: 1.5;
+}
+
+/* Same treatment as the grid's own unresolved wikilinks: grey and dotted, so a
+ * target that does not exist yet is distinguishable from one that does. */
+.super-csv-editor-links-unresolved {
+	color: var(--text-muted);
+	text-decoration: underline dotted;
+}
