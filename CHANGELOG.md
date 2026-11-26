@@ -1,3 +1,13 @@
+# Changelog - v0.0.4
+
+## Bug fixes
+
+- Auto-fit columns now measure cell values only instead of column headers, preventing values with emoji or wider glyphs from being truncated when their estimated width ties with or is narrower than the header.
+
+## Review & compatibility fixes
+
+- Implemented `getSettingDefinitions()` on `SuperCsvSettingTab` so plugin settings appear in Obsidian's global settings search on Obsidian 1.13.0+ (while keeping `display()` as a fallback for older versions).
+
 # Changelog - v0.0.3
 
 ## Features

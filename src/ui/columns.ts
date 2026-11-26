@@ -34,7 +34,7 @@ export const GHOST_COLUMN_WIDTH = 34;
 export type ManualWidths = Record<number, number>;
 
 /**
- * The single widest text per column.
+ * The single widest data value per column (ignoring column headers).
  *
  * The view measures these with the real DOM rather than guessing a width from a
  * character count, which is what previously truncated values: an estimate is
@@ -58,14 +58,12 @@ export function widestTextsByColumn(table: CsvTable): string[] {
 		// the DOM later; here we only pick which text to measure.
 		const value = stripInvisible(displayText(raw));
 		const width = cellDisplayWidth(value);
-		// Strictly greater, so the header wins a tie.
 		if (width > (bestWidth[col] ?? 0)) {
 			bestWidth[col] = width;
 			widest[col] = value;
 		}
 	};
 
-	for (let col = 0; col < cols; col++) consider(table.headers[col] ?? "", col);
 	for (const row of table.rows) {
 		for (let col = 0; col < cols; col++) consider(row[col] ?? "", col);
 	}
@@ -85,7 +83,6 @@ export function widestTextInColumn(table: CsvTable, col: number): string {
 			widest = value;
 		}
 	};
-	consider(table.headers[col] ?? "");
 	for (const row of table.rows) consider(row[col] ?? "");
 	return widest;
 }

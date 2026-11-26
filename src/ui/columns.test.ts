@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	widestTextsByColumn,
+	widestTextInColumn,
 	resizeWidth,
 	clampColumnWidth,
 	mergeWidths,
@@ -15,9 +16,16 @@ function tableOf(headers: string[], rows: string[][]): CsvTable {
 }
 
 describe("widestTextsByColumn", () => {
-	it("returns the header when the header is the widest thing", () => {
-		const texts = widestTextsByColumn(tableOf(["Title"], [["x"]]));
-		assert.deepEqual(texts, ["Title"]);
+	it("ignores the header even when the header is wider than the values", () => {
+		const texts = widestTextsByColumn(tableOf(["Very Long Title"], [["x"]]));
+		assert.deepEqual(texts, ["x"]);
+	});
+
+	it("returns the value instead of the header when their display widths tie", () => {
+		// Regression: "PLAT" (width 4) previously won the tie over "🎮PC" (width 4),
+		// causing the column to measure "PLAT" and clip "🎮PC" to "🎮...".
+		const texts = widestTextsByColumn(tableOf(["PLAT"], [["[[🎮PC]]"]]));
+		assert.deepEqual(texts, ["🎮PC"]);
 	});
 
 	it("returns the longest data cell, not the header", () => {
@@ -54,9 +62,7 @@ describe("widestTextsByColumn", () => {
 			eol: "\n",
 			trailingNewline: true,
 		};
-		// Headers "a" and "b" tie with the cells "1" and "2" at width 1, and
-		// the header wins a tie, so only column 2 changes.
-		assert.deepEqual(widestTextsByColumn(table), ["a", "b", "three"]);
+		assert.deepEqual(widestTextsByColumn(table), ["1", "2", "three"]);
 	});
 
 	it("prefers an emoji-heavy cell over a longer ASCII one", () => {
@@ -66,7 +72,7 @@ describe("widestTextsByColumn", () => {
 	});
 
 	it("ignores invisible marks when judging width", () => {
-		const texts = widestTextsByColumn(tableOf(["ab‎cd"], []));
+		const texts = widestTextsByColumn(tableOf(["col"], [["ab‎cd"]]));
 		assert.deepEqual(texts, ["abcd"]);
 	});
 
@@ -74,14 +80,26 @@ describe("widestTextsByColumn", () => {
 		assert.deepEqual(widestTextsByColumn(tableOf([], [])), []);
 	});
 
-	it("keeps the header for a column whose cells are all empty", () => {
-		// Column 2 has no data, so its header is still what gets measured.
-		assert.deepEqual(widestTextsByColumn(tableOf(["a", "b"], [["1"]])), ["a", "b"]);
+	it("returns an empty string for a column whose cells are all empty", () => {
+		assert.deepEqual(widestTextsByColumn(tableOf(["a", "b"], [["1"]])), ["1", ""]);
 	});
 
 	it("keeps a newline inside the returned text so wrapping can be measured", () => {
 		const texts = widestTextsByColumn(tableOf(["a"], [["one\ntwo"]]));
 		assert.equal(texts[0], "one\ntwo");
+	});
+});
+
+describe("widestTextInColumn", () => {
+	it("returns the widest data value and ignores the header", () => {
+		const table = tableOf(["Very Long Title", "PLAT"], [["x", "[[🎮PC]]"], ["xy", ""]]);
+		assert.equal(widestTextInColumn(table, 0), "xy");
+		assert.equal(widestTextInColumn(table, 1), "🎮PC");
+	});
+
+	it("returns an empty string when all data cells in the column are empty", () => {
+		const table = tableOf(["NOTE"], [[""], [""]]);
+		assert.equal(widestTextInColumn(table, 0), "");
 	});
 });
 
