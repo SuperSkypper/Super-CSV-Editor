@@ -1,6 +1,6 @@
 {
 	"name": "super-csv-editor",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"description": "Edit CSV files in a spreadsheet grid with fast cell editing and keyboard navigation.",
 	"main": "main.js",
 	"type": "module",
@@ -44,6 +44,9 @@
 	},
 	"dependencies": {
 		"obsidian": "latest"
+	},
+	"overrides": {
+		"moment": "^2.31.0"
 	},
 	"allowScripts": {
 		"esbuild@0.25.5": true

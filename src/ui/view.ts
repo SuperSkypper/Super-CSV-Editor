@@ -163,9 +163,14 @@ export class CsvView extends FileView {
 		this.linksPanel?.setFile(file.path);
 	}
 
-	/** Redraws from the in-memory table, e.g. when link resolution changed. */
+	/** Redraws from the in-memory table, e.g. when column width settings changed. */
 	refresh(): void {
 		this.grid?.refresh();
+	}
+
+	/** Updates wikilink resolved/unresolved styling in place without rebuilding the table. */
+	refreshLinks(): void {
+		this.grid?.refreshLinks();
 	}
 
 	/**
@@ -246,6 +251,11 @@ export class CsvView extends FileView {
 			},
 			getSourcePath: () => this.file?.path,
 			onSearchColumn: (col: number) => this.openSearchInColumn(col),
+			getColumnWidthLimits: () => ({
+				autoFit: this.plugin.settings.autoFitColumns,
+				min: this.plugin.settings.minColumnWidth,
+				max: this.plugin.settings.maxColumnWidth,
+			}),
 		});
 		this.grid.file = this.file;
 		this.grid.mount();
@@ -471,8 +481,9 @@ export class CsvView extends FileView {
 			},
 			{ capture: true },
 		);
-		// eslint-disable-next-line @typescript-eslint/no-deprecated -- getMostRecentLeaf cannot tell "is THIS leaf active".
-		this.setSearchScopeActive(this.app.workspace.activeLeaf === this.leaf);
+		this.setSearchScopeActive(
+			this.app.workspace.getActiveViewOfType(CsvView) === this,
+		);
 	}
 
 	private setSearchScopeActive(active: boolean): void {

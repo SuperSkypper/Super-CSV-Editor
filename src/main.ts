@@ -14,11 +14,18 @@ import { isCsvPath, CSV_EXTENSION } from "./ui/guard.ts";
 import { CsvEmbedComponent, type EmbedRegistry } from "./ui/embed.ts";
 import { parseRowLimit } from "./ui/embedParams.ts";
 import { NEW_CSV_CONTENT, untitledCsvPath } from "./ui/csvPath.ts";
+import { MIN_COLUMN_WIDTH } from "./ui/columns.ts";
 
 export interface SuperCsvSettings {
 	/** "auto" guesses the delimiter from the file contents. */
 	delimiter: string;
 	saveDelayMs: number;
+	/** Whether columns auto-fit to their content width (up to maxColumnWidth). */
+	autoFitColumns: boolean;
+	/** Minimum column width in pixels. */
+	minColumnWidth: number;
+	/** Maximum column width in pixels. 0 means no limit. */
+	maxColumnWidth: number;
 	/**
 	 * Whether an embed shows the "+ New row" / "+" strips. Off makes a
 	 * `![[file.csv]]` inside a note read as a plain table; the buttons
@@ -39,6 +46,9 @@ function humanize(id: string): string {
 const DEFAULT_SETTINGS: SuperCsvSettings = {
 	delimiter: "auto",
 	saveDelayMs: 400,
+	autoFitColumns: true,
+	minColumnWidth: MIN_COLUMN_WIDTH,
+	maxColumnWidth: 0,
 	// Minimal inside a note: the readout is workspace chrome and the
 	// add-row strip is a full-view affordance.
 	embedShowAddButtons: false,
@@ -82,6 +92,7 @@ interface RecentFilesOptions {
 export default class SuperCsvEditorPlugin extends Plugin {
 	settings!: SuperCsvSettings;
 	private pending = new Map<string, number>();
+	private repaintLinksTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		const loaded = (await this.loadData()) as unknown;
@@ -119,12 +130,21 @@ export default class SuperCsvEditorPlugin extends Plugin {
 		// created (and starts being grey the moment its note is deleted) without
 		// reopening the file. This is what Obsidian does for notes; without it
 		// the grid would keep showing whatever was true when it was drawn.
+		// Debounced so rapid metadataCache "resolved" bursts (startup, sync,
+		// bulk edits) coalesce into one pass instead of scanning resolvedLinks
+		// for every open CSV on each individual note save.
 		const repaintLinks = (): void => {
-			this.refreshOpenGrids();
-			// The links panel reads the same index the grid's colours come from,
-			// so one signal serves both: a rename or a new note changes what the
-			// panel lists and what the grid renders grey.
-			for (const view of this.views()) view.refreshLinksPanel();
+			if (this.repaintLinksTimer !== null) {
+				window.clearTimeout(this.repaintLinksTimer);
+			}
+			this.repaintLinksTimer = window.setTimeout(() => {
+				this.repaintLinksTimer = null;
+				for (const view of this.views()) {
+					view.refreshLinks();
+					view.refreshLinksPanel();
+				}
+				for (const embed of this.liveEmbeds) embed.refreshLinks();
+			}, 300);
 		};
 		// Both registrations are guarded: a missing event API must never take the
 		// whole plugin down over what is only a cosmetic refresh. An onload that
@@ -204,6 +224,11 @@ export default class SuperCsvEditorPlugin extends Plugin {
 				showStatus: this.settings.embedShowStatusBar,
 			});
 		}
+	}
+
+	/** Re-renders open views and embeds so new column width limits take effect immediately. */
+	applyColumnWidthSettings(): void {
+		this.refreshOpenGrids();
 	}
 
 	/**
@@ -501,6 +526,10 @@ export default class SuperCsvEditorPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		if (this.repaintLinksTimer !== null) {
+			window.clearTimeout(this.repaintLinksTimer);
+			this.repaintLinksTimer = null;
+		}
 		const registry = (this.app as App & { embedRegistry?: EmbedRegistry }).embedRegistry;
 		// Only remove the entry this instance added — see the note where it is
 		// registered.

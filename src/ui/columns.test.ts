@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
 	widestTextsByColumn,
 	resizeWidth,
+	clampColumnWidth,
 	mergeWidths,
 	GHOST_COLUMN_WIDTH,
 	MIN_COLUMN_WIDTH,
@@ -95,6 +96,34 @@ describe("resizeWidth", () => {
 
 	it("never goes below the minimum", () => {
 		assert.equal(resizeWidth(200, -9999), MIN_COLUMN_WIDTH);
+	});
+
+	it("respects custom min and max limits", () => {
+		assert.equal(resizeWidth(200, -9999, { min: 100, max: 300 }), 100);
+		assert.equal(resizeWidth(200, 9999, { min: 100, max: 300 }), 300);
+	});
+});
+
+describe("clampColumnWidth", () => {
+	it("uses MIN_COLUMN_WIDTH and no max by default", () => {
+		assert.equal(clampColumnWidth(10), MIN_COLUMN_WIDTH);
+		assert.equal(clampColumnWidth(1200), 1200);
+	});
+
+	it("applies custom min and max bounds", () => {
+		assert.equal(clampColumnWidth(50, { min: 80, max: 250 }), 80);
+		assert.equal(clampColumnWidth(150, { min: 80, max: 250 }), 150);
+		assert.equal(clampColumnWidth(500, { min: 80, max: 250 }), 250);
+	});
+
+	it("treats max <= 0 as unlimited", () => {
+		assert.equal(clampColumnWidth(900, { min: 60, max: 0 }), 900);
+	});
+
+	it("allows any non-negative minimum and never lets max fall below min", () => {
+		assert.equal(clampColumnWidth(50, { min: 200, max: 100 }), 200);
+		assert.equal(clampColumnWidth(5, { min: 10, max: 0 }), 10);
+		assert.equal(clampColumnWidth(5, { min: 0, max: 0 }), 5);
 	});
 });
 

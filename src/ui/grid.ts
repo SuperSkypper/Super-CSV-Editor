@@ -24,6 +24,7 @@ import {
 	renameColumn,
 	setCell,
 	setCellInPlace,
+	reindexRagged,
 	sortRows,
 } from "../parser/table.ts";
 import {
@@ -62,9 +63,13 @@ import { linkResolution } from "./linkResolution.ts";
 import { clampVisibleRow, visibleRowCount, type RowLimit } from "./rowLimit.ts";
 import {
 	widestTextsByColumn,
+	widestTextInColumn,
 	resizeWidth,
+	clampColumnWidth,
+	DEFAULT_COLUMN_WIDTH,
 	GHOST_COLUMN_WIDTH,
 	MIN_COLUMN_WIDTH,
+	type ColumnWidthLimits,
 	type ManualWidths,
 } from "./columns.ts";
 
@@ -121,7 +126,7 @@ export const CSV_VIEW_TYPE = "super-csv-editor-view";
 const CELL_BORDER_SLACK_PX = 2;
 
 /** How many undo steps are kept. */
-const UNDO_LIMIT = 200;
+const UNDO_LIMIT = 50;
 
 /**
  * Width of the row-number gutter on the left.
@@ -143,6 +148,8 @@ export interface GridHost {
 	getSourcePath(): string | undefined;
 	/** Opens the search bar scoped to a single column, when the host has one. */
 	onSearchColumn?(col: number): void;
+	/** Optional min/max column width bounds (in px) from plugin settings. */
+	getColumnWidthLimits?(): Partial<ColumnWidthLimits>;
 }
 
 /** Presentation options an embed can override. The full view uses none. */
@@ -242,14 +249,20 @@ export class GridController implements CsvSource {
 	 */
 	private selection: Selection | null = null;
 	private original = "";
+	/** Cached dirty flag so `updateStatus()` does not re-serialise the whole CSV. */
+	private dirty = false;
 	private editor: HTMLTextAreaElement | null = null;
 	private editorOrigin: Focus | null = null;
 	/** A redraw asked for mid-edit, held until the editor closes. */
 	private refreshPending = false;
 	/** The `[[` autocomplete for the open cell editor, if any. */
 	private suggest: LinkSuggestPopover | null = null;
-	private cellEls: HTMLElement[] = [];
+	private rowEls: HTMLElement[] = [];
+	private cellByKey = new Map<string, HTMLElement>();
+	private paintedSelected = new Set<HTMLElement>();
+	private paintedFocused: HTMLElement | null = null;
 	private statusEl: HTMLElement | null = null;
+	private flashTimer: number | null = null;
 	/** Whether this grid shows the status bar; false inside an embed. */
 	private showStatus = true;
 	/**
@@ -403,6 +416,16 @@ export class GridController implements CsvSource {
 		this.detachAddRowScroll = null;
 		this.detachAddColScroll?.();
 		this.detachAddColScroll = null;
+		if (this.flashTimer !== null) {
+			window.clearTimeout(this.flashTimer);
+			this.flashTimer = null;
+		}
+		this.rowEls = [];
+		this.cellByKey.clear();
+		this.paintedSelected.clear();
+		this.paintedFocused = null;
+		this.undoStack = [];
+		this.redoStack = [];
 		// The popover is attached to document.body, not to the container, so
 		// nothing else removes it and it would outlive the grid.
 		this.suggest?.close();
@@ -447,6 +470,7 @@ export class GridController implements CsvSource {
 		// byte-for-byte round-trip mismatch can never leave a freshly opened file
 		// reporting "modified" (and saving on close) without an edit.
 		this.original = this.getViewData();
+		this.dirty = false;
 	}
 
 	/**
@@ -496,22 +520,45 @@ export class GridController implements CsvSource {
 		this.renderOrDefer();
 	}
 
-	/** Re-renders from the current table, e.g. after the file was renamed. */
+	/** Re-renders from the current table, e.g. after settings changed. */
 	refresh(): void {
 		this.renderOrDefer();
 	}
 
 	/**
-	 * Applies the search filter. An empty query shows every row again. When
-	 * `column` is provided, only cells in that column are matched. Which rows
-	 * are hidden is recomputed by `render()`, so this only records the query
-	 * and rebuilds.
+	 * Updates resolved/unresolved styling on rendered wikilinks in place,
+	 * without rebuilding the entire table DOM.
+	 */
+	refreshLinks(): void {
+		const links = this.containerEl.querySelectorAll<HTMLElement>(
+			".super-csv-editor-wikilink",
+		);
+		for (let i = 0; i < links.length; i++) {
+			const link = links[i];
+			const target = link?.dataset.target;
+			if (!link || !target) continue;
+			link.classList.toggle("is-unresolved", !this.resolvesToFile(target));
+		}
+	}
+
+	/**
+	 * Applies the search filter in place by toggling `is-filtered-out` on the
+	 * existing row elements — avoiding a full table DOM rebuild on every
+	 * keystroke in the search box.
 	 */
 	setFilter(query: string, column: number | null = null): void {
 		if (this.filterQuery === query && this.filterColumn === column) return;
 		this.filterQuery = query;
 		this.filterColumn = column;
-		this.renderOrDefer();
+		this.recomputeFilter();
+		for (let row = 0; row < this.rowEls.length; row++) {
+			this.rowEls[row]?.classList.toggle(
+				"is-filtered-out",
+				this.hiddenRows.has(row),
+			);
+		}
+		this.paint();
+		this.updateStatus();
 	}
 
 	/**
@@ -565,6 +612,7 @@ export class GridController implements CsvSource {
 this.render(this.showStatus);
 		// Normalise the baseline like loadText, so own writes do not look dirty.
 		this.original = this.getViewData();
+		this.dirty = false;
 		return true;
 	}
 
@@ -572,6 +620,7 @@ this.render(this.showStatus);
 	reset(): void {
 		this.table = { headers: [], rows: [], raggedRows: [] };
 		this.original = "";
+		this.dirty = false;
 		this.undoStack = [];
 		this.redoStack = [];
 		// An emptied grid has nothing to select, and leaving a stale rectangle
@@ -605,7 +654,7 @@ this.render(this.showStatus);
 	}
 
 	isDirty(): boolean {
-		return this.getViewData() !== this.original;
+		return this.dirty;
 	}
 
 	/**
@@ -623,6 +672,8 @@ this.render(this.showStatus);
 	markSaved(savedText: string): void {
 		if (this.getViewData() !== savedText) return;
 		this.original = savedText;
+		this.dirty = false;
+		this.updateStatus();
 	}
 
 	// ── Focus & selection ──────────────────────────────────────────────────
@@ -750,31 +801,35 @@ this.render(this.showStatus);
 	}
 
 	private paint(): void {
-		const chosen = new Set(
-			this.getSelectedCells().map((c) => `${c.row}:${c.col}`),
-		);
+		const nextSelected = new Set<HTMLElement>();
+		for (const c of this.getSelectedCells()) {
+			const el = this.cellByKey.get(`${c.row}:${c.col}`);
+			if (el) nextSelected.add(el);
+		}
+		// Only touch cells whose selection state actually changed — O(selected)
+		// instead of scanning every cell in the sheet on each arrow key or drag.
+		for (const el of this.paintedSelected) {
+			if (!nextSelected.has(el)) el.classList.remove("is-selected");
+		}
+		for (const el of nextSelected) {
+			if (!this.paintedSelected.has(el)) el.classList.add("is-selected");
+		}
+		this.paintedSelected = nextSelected;
+
 		// With a cleared selection nothing may keep the highlight: `is-focused`
 		// draws the accent outline, so it has to follow the selection too.
 		const hasSelection = this.selection !== null;
-		for (const el of this.cellEls) {
-			const key = `${el.dataset.row}:${el.dataset.col}`;
-			el.classList.toggle("is-selected", chosen.has(key));
-			el.classList.toggle(
-				"is-focused",
-				hasSelection &&
-					Number(el.dataset.row) === this.focus.row &&
-					Number(el.dataset.col) === this.focus.col,
-			);
+		const nextFocused = hasSelection
+			? (this.cellByKey.get(`${this.focus.row}:${this.focus.col}`) ?? null)
+			: null;
+		if (this.paintedFocused !== nextFocused) {
+			this.paintedFocused?.classList.remove("is-focused");
+			nextFocused?.classList.add("is-focused");
+			this.paintedFocused = nextFocused;
 		}
 		// Scrolling into view is only meaningful while something is selected;
 		// otherwise a click elsewhere in the note would yank the grid back.
-		if (!hasSelection) return;
-		const active = this.cellEls.find(
-			(el) =>
-				Number(el.dataset.row) === this.focus.row &&
-				Number(el.dataset.col) === this.focus.col,
-		);
-		active?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		nextFocused?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 
 	// ── Editing ────────────────────────────────────────────────────────────
@@ -789,11 +844,9 @@ this.render(this.showStatus);
 		const value = this.table.rows[row]?.[col] ?? "";
 		// The editor lives INSIDE the cell and fills it, so no separate popup
 		// window ever appears over the grid.
-		const editor = document.createElement("textarea");
-		editor.className = EDITOR_CLASS;
+		const editor = cell.createEl("textarea", { cls: EDITOR_CLASS });
 		editor.value = value;
 		editor.spellcheck = false;
-		cell.appendChild(editor);
 		cell.classList.add("is-editing");
 		this.editor = editor;
 		this.editorOrigin = { row, col };
@@ -887,13 +940,16 @@ this.render(this.showStatus);
 		this.suggest = null;
 
 		const value = editor.value;
-		const oldWidest = widestTextsByColumn(this.table)[origin.col] ?? "";
-		if ((this.table.rows[origin.row]?.[origin.col] ?? "") !== value) {
+		const oldValue = this.table.rows[origin.row]?.[origin.col] ?? "";
+		const changed = oldValue !== value;
+		const autoFit = this.host.getColumnWidthLimits?.()?.autoFit ?? true;
+		const oldWidest =
+			changed && autoFit ? widestTextInColumn(this.table, origin.col) : "";
+		if (changed) {
 			this.recordUndo();
 			this.table = setCell(this.table, origin.row, origin.col, value);
-			const cell = this.containerEl.querySelector<HTMLElement>(
-				`.super-csv-editor-cell[data-row="${origin.row}"][data-col="${origin.col}"]`,
-			);
+			this.dirty = true;
+			const cell = this.cellByKey.get(`${origin.row}:${origin.col}`);
 			if (cell) {
 				cell.classList.toggle("is-empty", value === "");
 				this.renderCell(cell, value);
@@ -904,22 +960,23 @@ this.render(this.showStatus);
 
 		editor.parentElement?.classList.remove("is-editing");
 		editor.remove();
-		// Hand the keyboard back to the grid. Removing the focused textarea
-		// leaves document.activeElement on <body>, and every shortcut is
-		// gated on the container owning the focus — so without this, the grid
-		// goes deaf after the first edit (Enter stops reopening the editor).
-		//
-		// Except when the commit came from a blur caused by the user clicking
-		// elsewhere: then focus belongs to whatever they clicked, and claiming
-		// it here is what stopped a click on another note from going there.
 		if (reclaimFocus) this.containerEl.focus();
-		// A redraw asked for mid-edit, or ANY edit while a search filter is
-		// active, needs the whole grid rebuilt: the single-cell repaint above
-		// cannot hide a row that stopped matching or reveal one that started.
-		const widthChanged = widestTextsByColumn(this.table)[origin.col] !== oldWidest;
-const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || widthChanged;
+		const widthChanged =
+			changed &&
+			autoFit &&
+			widestTextInColumn(this.table, origin.col) !== oldWidest;
+		const needsRebuild = this.refreshPending || widthChanged;
 		this.refreshPending = false;
-		if (needsRebuild) this.render(this.showStatus);
+		if (needsRebuild) {
+			this.render(this.showStatus);
+		} else if (changed && this.filterQuery.trim() !== "") {
+			// Update only the edited row's filter visibility without rebuilding the table.
+			this.recomputeFilter();
+			this.rowEls[origin.row]?.classList.toggle(
+				"is-filtered-out",
+				this.hiddenRows.has(origin.row),
+			);
+		}
 		if (focusAfter) this.setFocus(focusAfter);
 		else this.paint();
 	}
@@ -1011,6 +1068,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 		this.redoStack.push(this.snapshotTable());
 		this.table = previous;
+		this.dirty = this.getViewData() !== this.original;
 		this.render(this.showStatus);
 		this.host.onChange();
 	}
@@ -1023,6 +1081,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 		this.undoStack.push(this.snapshotTable());
 		this.table = next;
+		this.dirty = this.getViewData() !== this.original;
 		this.render(this.showStatus);
 		this.host.onChange();
 	}
@@ -1030,6 +1089,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 	private mutate(fn: (t: CsvTable) => CsvTable, focus?: Focus): void {
 		this.recordUndo();
 		this.table = fn(this.table);
+		this.dirty = true;
 		// this.showStatus, not the parameter: mutate() is the re-render path
 		// for every edit, and an embed must not regain its status bar the
 		// first time a cell is edited.
@@ -1067,10 +1127,26 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		// changes on every edit, so it is recomputed here rather than only when
 		// the query changes — a cell edited to (or away from) a match has to
 		// move in or out of the filter immediately.
+		// Disconnect observers and scroll listeners from the previous DOM before
+		// emptying it, so detached nodes are never retained in memory (even when
+		// showAddButtons is false).
+		this.addColObserver?.disconnect();
+		this.addColObserver = null;
+		this.repinAddColumn = null;
+		this.addRowObserver?.disconnect();
+		this.addRowObserver = null;
+		this.detachAddRowScroll?.();
+		this.detachAddRowScroll = null;
+		this.detachAddColScroll?.();
+		this.detachAddColScroll = null;
+
 		this.recomputeFilter();
 		container.empty();
 		container.addClass("super-csv-editor-container");
-		this.cellEls = [];
+		this.rowEls = [];
+		this.cellByKey.clear();
+		this.paintedSelected.clear();
+		this.paintedFocused = null;
 		this.editor = null;
 		this.editorOrigin = null;
 		// render() rebuilds the whole grid, so any open editor (and its popover)
@@ -1161,12 +1237,15 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 
 		const tbody = table.createEl("tbody");
+		this.wireBody(tbody);
+		const raggedSet = new Set(this.table.raggedRows);
 		for (let row = 0; row < visible; row++) {
-			const isRagged = this.table.raggedRows.includes(row);
+			const isRagged = raggedSet.has(row);
 			const rowEl = tbody.createEl("tr", {
 				cls: isRagged ? "super-csv-editor-row is-ragged" : "super-csv-editor-row",
 				attr: { "data-row": String(row) },
 			});
+			this.rowEls.push(rowEl);
 			// A row the search does not match is hidden by CSS, not dropped: the
 			// cells keep their data-row so editing, selection and the clipboard
 			// still address the real file lines underneath.
@@ -1175,35 +1254,10 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 			// data-row/data-col, so selection, editing and the clipboard all skip
 			// it, and it can never be written back to the CSV. Right-click opens
 			// a row-scoped menu so the number acts as a row handle.
-			const gutterCell = rowEl.createEl("td", {
+			rowEl.createEl("td", {
 				cls: "super-csv-editor-cell is-gutter-cell",
 				text: String(row + 1),
 			});
-			gutterCell.addEventListener("contextmenu", (event) => {
-				event.preventDefault();
-				this.focus = { ...this.focus, row };
-				this.showRowMenu(event, row);
-			});
-			// Clicking the row number selects that whole row, the way a
-					// spreadsheet's row header does. Ctrl/Cmd adds it to the selection and
-					// Shift extends from the anchor to here, which is what makes deleting
-					// a block of consecutive rows possible without Ctrl-clicking each one.
-					gutterCell.addEventListener("mousedown", (event) => {
-						if (event.button !== 0) return;
-						event.preventDefault();
-						event.stopPropagation();
-						// Keep the grid focused so arrows work right after the
-						// click, e.g. selecting a row and pressing Down.
-						this.containerEl.focus();
-						if (event.shiftKey && this.selection !== null) {
-							// Anchor on the first cell so the focus cell (which
-							// scrolls into view) does not drag the sheet all the
-							// way to the last column on a shift-click.
-							this.setFocus({ row, col: 0 }, true, false);
-							return;
-						}
-						this.selectRow(row, event.ctrlKey || event.metaKey);
-					});
 			for (let col = 0; col < cols; col++) {
 				const value = this.table.rows[row]?.[col] ?? "";
 				const cell = rowEl.createEl("td", {
@@ -1211,8 +1265,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 					attr: { "data-row": String(row), "data-col": String(col) },
 				});
 				this.renderCell(cell, value);
-				this.cellEls.push(cell);
-				this.wireCell(cell, row, col);
+				this.cellByKey.set(`${row}:${col}`, cell);
 			}
 			// The ghost slot (where the "+" is drawn) and, in the full view, the
 			// slack filler that closes the row. Neither carries
@@ -1240,9 +1293,8 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		// An embed can hide both strips; the context menus still insert rows
 		// and columns, so nothing becomes unreachable.
 		if (this.showAddButtons) {
-			const addRowBar = wrap.createEl("div", { cls: "super-csv-editor-add-row" });
-			// eslint-disable-next-line obsidianmd/ui/sentence-case -- the "+" is the call to action, "New row" is a label
-			addRowBar.setText("+ New row");
+			const addRowBar = wrap.createDiv({ cls: "super-csv-editor-add-row" });
+			addRowBar.setText("+ new row");
 			addRowBar.setAttribute("aria-label", "Add row");
 			addRowBar.setAttribute("role", "button");
 			addRowBar.addEventListener("click", () => this.addRowAtEnd());
@@ -1250,12 +1302,12 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 
 		// "+ new column" reads vertically in the ghost slot, so the control is
-		// labelled the same way "+ New row" is instead of being a bare "+" whose
+		// labelled the same way "+ new row" is instead of being a bare "+" whose
 		// meaning the user has to infer. It must be ONE text node: splitting it
 		// into spans so each character rotates independently renders every glyph
 		// sideways, which is illegible.
 		if (this.showAddButtons) {
-			const addColBar = wrap.createEl("div", { cls: "super-csv-editor-add-col" });
+			const addColBar = wrap.createDiv({ cls: "super-csv-editor-add-col" });
 			addColBar.setText("+ new column");
 			addColBar.setAttribute("aria-label", "Add column");
 			addColBar.setAttribute("role", "button");
@@ -1283,42 +1335,150 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 	}
 
-	private wireCell(cell: HTMLElement, row: number, col: number): void {
-		cell.addEventListener("mousedown", (event) => {
+	/**
+	 * Delegates cell and row-gutter pointer events at the `<tbody>` level so a
+	 * 1,000-row sheet registers 4 listeners instead of tens of thousands of
+	 * per-cell closures.
+	 */
+	private wireBody(tbody: HTMLElement): void {
+		tbody.addEventListener("mousedown", (event) => {
 			if (event.button !== 0) return;
-			// Clicks inside the editor belong to that target; the cell must
-			// not steal focus back from an open editor.
-			const target = event.target as HTMLElement;
-			if (target.closest(EDITOR_SELECTOR)) return;
-			// Wikilink clicks fall through here on purpose: a plain click on a
-			// link must select the cell and let the editor open, same as
-			// clicking any other part of the cell. Ctrl+click opens the note.
-			// Keep the browser from starting a text selection or native drag.
+			const target = event.target as HTMLElement | null;
+			if (!target || target.closest(EDITOR_SELECTOR)) return;
+			if (target.closest(".super-csv-editor-checkbox")) return;
+
+			const gutter = target.closest<HTMLElement>(
+				".super-csv-editor-cell.is-gutter-cell",
+			);
+			if (gutter) {
+				const row = Number(gutter.parentElement?.dataset.row);
+				if (!Number.isFinite(row)) return;
+				event.preventDefault();
+				event.stopPropagation();
+				this.containerEl.focus();
+				if (event.shiftKey && this.selection !== null) {
+					this.setFocus({ row, col: 0 }, true, false);
+					return;
+				}
+				this.selectRow(row, event.ctrlKey || event.metaKey);
+				return;
+			}
+
+			const cell = target.closest<HTMLElement>(
+				".super-csv-editor-cell[data-row][data-col]",
+			);
+			if (!cell) return;
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			if (!Number.isFinite(row) || !Number.isFinite(col)) return;
 			event.preventDefault();
 			this.setFocus({ row, col }, event.shiftKey, event.ctrlKey || event.metaKey);
 			this.containerEl.focus();
 			this.dragging = true;
 		});
 
-		cell.addEventListener("mouseenter", (event) => {
-			if (!this.dragging) return;
-			if (event.buttons === 1) this.setFocus({ row, col }, true, false);
+		tbody.addEventListener("mouseover", (event) => {
+			if (!this.dragging || event.buttons !== 1) return;
+			const target = event.target as HTMLElement | null;
+			const cell = target?.closest<HTMLElement>(
+				".super-csv-editor-cell[data-row][data-col]",
+			);
+			if (!cell) return;
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+			if (row === this.focus.row && col === this.focus.col) return;
+			this.setFocus({ row, col }, true, false);
 		});
 
-		cell.addEventListener("dblclick", (event) => {
-			const target = event.target as HTMLElement;
-			if (target.closest(EDITOR_SELECTOR)) return;
+		tbody.addEventListener("dblclick", (event) => {
+			const target = event.target as HTMLElement | null;
+			if (!target || target.closest(EDITOR_SELECTOR)) return;
+			const cell = target.closest<HTMLElement>(
+				".super-csv-editor-cell[data-row][data-col]",
+			);
+			if (!cell) return;
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			if (!Number.isFinite(row) || !Number.isFinite(col)) return;
 			this.startEdit(row, col);
 		});
 
-		cell.addEventListener("contextmenu", (event) => {
-			// Right-click acts on what is under the cursor when it is already part
-			// of the selection, and otherwise replaces the selection.
+		tbody.addEventListener("contextmenu", (event) => {
+			const target = event.target as HTMLElement | null;
+			if (!target) return;
+			const gutter = target.closest<HTMLElement>(
+				".super-csv-editor-cell.is-gutter-cell",
+			);
+			if (gutter) {
+				const row = Number(gutter.parentElement?.dataset.row);
+				if (!Number.isFinite(row)) return;
+				event.preventDefault();
+				this.focus = { ...this.focus, row };
+				this.showRowMenu(event, row);
+				return;
+			}
+			const cell = target.closest<HTMLElement>(
+				".super-csv-editor-cell[data-row][data-col]",
+			);
+			if (!cell) return;
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			if (!Number.isFinite(row) || !Number.isFinite(col)) return;
 			event.preventDefault();
 			if (!isSelected(this.selection, { row, col }, this.hiddenRows)) {
 				this.setFocus({ row, col });
 			}
 			this.showCellMenu(event);
+		});
+
+		// Delegated link clicks (external URLs + wikilinks) and boolean checkbox toggles.
+		tbody.addEventListener("click", (event) => {
+			const target = event.target as HTMLElement | null;
+			if (!target) return;
+			const extLink = target.closest<HTMLAnchorElement>("a.super-csv-editor-link");
+			if (extLink) {
+				event.preventDefault();
+				event.stopPropagation();
+				const url = extLink.getAttribute("href");
+				if (url) this.openExternalUrl(url);
+				return;
+			}
+			const wikiLink = target.closest<HTMLAnchorElement>("a.super-csv-editor-wikilink");
+			if (wikiLink) {
+				event.preventDefault();
+				event.stopPropagation();
+				if (event.ctrlKey || event.metaKey) {
+					const linkTarget = wikiLink.dataset.target;
+					if (linkTarget) {
+						this.openWikilink(
+							linkTarget,
+							wikiLink.dataset.heading,
+							wikiLink.dataset.blockId,
+						);
+					}
+				}
+			}
+		});
+
+		tbody.addEventListener("change", (event) => {
+			const target = event.target as HTMLElement | null;
+			if (!target?.classList.contains("super-csv-editor-checkbox")) return;
+			const checkbox = target as HTMLInputElement;
+			const cell = checkbox.closest<HTMLElement>(
+				".super-csv-editor-cell[data-row][data-col]",
+			);
+			if (!cell) return;
+			const row = Number(cell.dataset.row);
+			const col = Number(cell.dataset.col);
+			const next = checkbox.checked ? "true" : "false";
+			if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+			if ((this.table.rows[row]?.[col] ?? "") === next) return;
+			this.recordUndo();
+			this.table = setCell(this.table, row, col, next);
+			this.dirty = true;
+			this.host.onChange();
+			this.updateStatus();
 		});
 	}
 
@@ -1513,15 +1673,13 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		menu.addSeparator();
 		menu.addItem((item) =>
 			item
-				// eslint-disable-next-line obsidianmd/ui/sentence-case -- the user asked for the literal "A-Z" form
-				.setTitle("Sort A-Z")
+				.setTitle("Sort ascending")
 				.setIcon("arrow-up")
 				.onClick(() => this.sortBy(col, "asc")),
 		);
 		menu.addItem((item) =>
 			item
-				// eslint-disable-next-line obsidianmd/ui/sentence-case -- the user asked for the literal "Z-A" form
-				.setTitle("Sort Z-A")
+				.setTitle("Sort descending")
 				.setIcon("arrow-down")
 				.onClick(() => this.sortBy(col, "desc")),
 		);
@@ -1582,7 +1740,11 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 			return;
 		}
 		this.statusEl.setText(message);
-		window.setTimeout(() => this.updateStatus(), 1200);
+		if (this.flashTimer !== null) window.clearTimeout(this.flashTimer);
+		this.flashTimer = window.setTimeout(() => {
+			this.flashTimer = null;
+			this.updateStatus();
+		}, 1200);
 	}
 
 	private copySelection(): void {
@@ -1600,6 +1762,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		void this.writeClipboard(copied);
 		this.recordUndo();
 		this.table = table;
+		this.dirty = true;
 		const keepScroll = this.containerEl.querySelector<HTMLElement>(
 			".super-csv-editor-scroll",
 		);
@@ -1687,6 +1850,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		}
 	}
 	this.table = out;
+	if (count > 0) this.dirty = true;
 	this.render(this.showStatus);
 	this.host.onChange();
 	this.updateStatus();
@@ -1697,6 +1861,7 @@ private clearSelection(): void {
 	if (cells.length === 0) return;
 		this.recordUndo();
 		this.table = clearCells(this.table, cells, this.hiddenRows);
+		this.dirty = true;
 		this.render(this.showStatus);
 		this.setFocus(this.focus);
 		this.host.onChange();
@@ -1744,12 +1909,14 @@ private clearSelection(): void {
 					: this.hiddenRows.has(origin.row)
 						? []
 						: [origin];
-			let next = this.table;
-			for (const cell of cells) next = setCell(next, cell.row, cell.col, value);
-			this.table = next;
+			// Clone once for the whole paste instead of cloning per cell.
+			const out = clone(this.table);
+			for (const cell of cells) setCellInPlace(out, cell.row, cell.col, value);
+			this.table = reindexRagged(out, out.headers.length);
 		} else {
 			this.table = pasteGrid(this.table, grid, origin, this.hiddenRows);
 		}
+		this.dirty = true;
 
 		const keepScroll = this.containerEl.querySelector<HTMLElement>(
 			".super-csv-editor-scroll",
@@ -1800,71 +1967,66 @@ private clearSelection(): void {
 	 * resolved from the CSV's own path, which is what decides which note a bare
 	 * `[[Note]]` points at when several share the name.
 	 */
+	private openExternalUrl(url: string): void {
+		try {
+			const electron = (window as unknown as { require?: (m: string) => unknown }).require?.("electron");
+			const shell = (electron as { shell?: { openExternal?: (u: string) => void } } | undefined)?.shell;
+			if (shell?.openExternal) {
+				shell.openExternal(url);
+				return;
+			}
+		} catch {
+			// Fall through to window.open.
+		}
+		window.open(url, "_blank");
+	}
+
 	private renderCell(cell: HTMLElement, value: string): void {
-		cell.empty();
+		if (value === "") {
+			cell.textContent = "";
+			return;
+		}
 		const lowered = value.trim().toLowerCase();
 		if (lowered === "true" || lowered === "false") {
-			const row = Number(cell.dataset.row);
-			const col = Number(cell.dataset.col);
+			cell.empty();
 			const checkbox = cell.createEl("input", { type: "checkbox" });
 			checkbox.className = "super-csv-editor-checkbox";
 			checkbox.checked = lowered === "true";
-			// Keep the cell selection logic from swallowing the toggle.
-			checkbox.addEventListener("mousedown", (event) => event.stopPropagation());
-			checkbox.addEventListener("change", () => {
-				const next = checkbox.checked ? "true" : "false";
-				if (!Number.isFinite(row) || !Number.isFinite(col)) return;
-				if ((this.table.rows[row]?.[col] ?? "") === next) return;
-				this.recordUndo();
-				this.table = setCell(this.table, row, col, next);
-				this.host.onChange();
-				this.updateStatus();
-			});
 			cell.classList.remove("is-empty");
 			return;
 		}
+		// Fast path for plain cells (no wikilinks, no URLs): avoids regex
+		// allocation, segment arrays, and child element creation.
+		if (!value.includes("[[") && !value.includes("http")) {
+			cell.textContent = formatDisplayValue(value);
+			return;
+		}
+		cell.empty();
+		const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)|(https?:\/\/[^)\s]+)/g;
 		for (const segment of splitWikilinks(value)) {
 			if (segment.kind === "text") {
-					// Bare URLs and Markdown-style links become clickable, the way a
-					// wikilink does (Ctrl/Cmd+click opens them). The plain text is kept
-					// on disk; only the rendering turns it into a link.
-					const value = formatDisplayValue(segment.value);
-					const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)|(https?:\/\/[^)\s]+)/g;
-					let cursor = 0;
-					for (const match of value.matchAll(linkPattern)) {
-						const start = match.index ?? 0;
-						if (start > cursor) cell.appendText(value.slice(cursor, start));
-						const label = match[1] ?? match[3] ?? "";
-						const url = match[2] ?? match[3] ?? "";
-						const link = cell.createEl("a", {
-							cls: "super-csv-editor-link",
-							text: label,
-							href: url,
-						});
-						link.addEventListener("click", (event) => {
-										event.preventDefault();
-										event.stopPropagation();
-										const openUrl = (): void => {
-											try {
-												const electron = (window as unknown as { require?: (m: string) => unknown }).require?.("electron");
-												const shell = (electron as { shell?: { openExternal?: (u: string) => void } } | undefined)?.shell;
-												if (shell?.openExternal) {
-													shell.openExternal(url);
-													return;
-												}
-											} catch {
-												// Fall through to window.open.
-											}
-											window.open(url, "_blank");
-										};
-										// Open immediately on any click.
-														openUrl();
-									});
-						cursor = start + (match[0]?.length ?? 0);
-					}
-					if (cursor < value.length) cell.appendText(value.slice(cursor));
+				const formatted = formatDisplayValue(segment.value);
+				if (!formatted.includes("http")) {
+					cell.appendText(formatted);
 					continue;
 				}
+				linkPattern.lastIndex = 0;
+				let cursor = 0;
+				for (const match of formatted.matchAll(linkPattern)) {
+					const start = match.index ?? 0;
+					if (start > cursor) cell.appendText(formatted.slice(cursor, start));
+					const label = match[1] ?? match[3] ?? "";
+					const url = match[2] ?? match[3] ?? "";
+					cell.createEl("a", {
+						cls: "super-csv-editor-link",
+						text: label,
+						href: url,
+					});
+					cursor = start + (match[0]?.length ?? 0);
+				}
+				if (cursor < formatted.length) cell.appendText(formatted.slice(cursor));
+				continue;
+			}
 			const link = cell.createEl("a", {
 				cls: "internal-link super-csv-editor-wikilink",
 				text: segment.display,
@@ -1878,19 +2040,6 @@ private clearSelection(): void {
 			link.dataset.target = segment.target;
 			if (segment.heading) link.dataset.heading = segment.heading;
 			if (segment.blockId) link.dataset.blockId = segment.blockId;
-			// A click on a wikilink must edit the cell, not open the note.
-			// Plain click selects + edits the cell; Ctrl+click (or the context
-			// menu) opens the note. The mousedown falls through to the cell's
-			// own handler so the cell is selected and the editor opens —
-			// previously stopPropagation on mousedown meant clicking a link
-			// did nothing useful and the user had to click the cell text first.
-			link.addEventListener("click", (event) => {
-				event.preventDefault();
-				event.stopPropagation();
-				if (event.ctrlKey || event.metaKey) {
-					this.openWikilink(segment.target, segment.heading, segment.blockId);
-				}
-			});
 		}
 	}
 
@@ -1935,23 +2084,29 @@ private clearSelection(): void {
 		// first cell of every row. Without a matching <col> every data column
 		// would shift one band left under table-layout: fixed.
 		group.createEl("col").style.width = `${GUTTER_WIDTH_PX}px`;
-		const widest = widestTextsByColumn(this.table);
 
-		const host = this.containerEl.createDiv({ cls: "super-csv-editor-measure" });
-		const probeCell = host
-			.createEl("table", { cls: "super-csv-editor-grid" })
-			.createEl("tbody")
-			.createEl("tr")
-			.createEl("td", { cls: "super-csv-editor-cell" });
-		const range = document.createRange();
+		const limits = this.host.getColumnWidthLimits?.();
+		const autoFit = limits?.autoFit ?? true;
 
-		for (let col = 0; col < cols; col++) {
-			probeCell.setText(widest[col] || " ");
-			range.selectNodeContents(probeCell);
-			const textWidth = range.getBoundingClientRect().width;
-
-			// Padding and borders are read from the cell itself, so the stylesheet
-			// stays the single source of truth for how much chrome a cell has.
+		if (!autoFit) {
+			for (let col = 0; col < cols; col++) {
+				const manual = this.manualWidths[col];
+				group.createEl("col").style.width = `${clampColumnWidth(
+					manual ?? DEFAULT_COLUMN_WIDTH,
+					limits,
+				)}px`;
+			}
+		} else {
+			const widest = widestTextsByColumn(this.table);
+			const host = this.containerEl.createDiv({ cls: "super-csv-editor-measure" });
+			const probeCell = host
+				.createEl("table", { cls: "super-csv-editor-grid" })
+				.createEl("tbody")
+				.createEl("tr")
+				.createEl("td", { cls: "super-csv-editor-cell" });
+			const range = document.createRange();
+			// Padding and borders are read once from the probe cell so the stylesheet
+			// stays the single source of truth without recomputing style per column.
 			const cs = window.getComputedStyle(probeCell);
 			const chrome =
 				Number.parseFloat(cs.paddingLeft) +
@@ -1959,48 +2114,30 @@ private clearSelection(): void {
 				Number.parseFloat(cs.borderLeftWidth) +
 				Number.parseFloat(cs.borderRightWidth);
 
-			// A <col> width is border-box, so the cell ends up one border short of
-			// text+chrome: the neighbouring cell's border eats the last pixel. One
-			// extra pixel per side clears it, which is invisible next to the
-			// alternative of a clipped last character.
-			const manual = this.manualWidths[col];
-			const needed = Math.ceil(textWidth) + chrome + CELL_BORDER_SLACK_PX;
-			// Every data column gets a concrete width, INCLUDING the last one.
-			// Leaving the last <col> automatic (to absorb leftover space) is
-			// what broke it: under table-layout: fixed an automatic column whose
-			// siblings already exceed the table's width resolves to a 0px band,
-			// so the last real column collapsed and the row visually ended on the
-			// second-to-last one.
-			//
-			// The width is the AUTO-FIT width, never less: the user sizes columns
-			// to their content and scrolls when the grid does not fit, so the grid
-			// must not shrink columns to avoid a scrollbar.
-			group.createEl("col").style.width = `${manual ?? Math.max(needed, MIN_COLUMN_WIDTH)}px`;
+			for (let col = 0; col < cols; col++) {
+				probeCell.setText(widest[col] || " ");
+				range.selectNodeContents(probeCell);
+				const textWidth = range.getBoundingClientRect().width;
+
+				// A <col> width is border-box, so the cell ends up one border short of
+				// text+chrome: the neighbouring cell's border eats the last pixel. One
+				// extra pixel per side clears it, which is invisible next to the
+				// alternative of a clipped last character.
+				const manual = this.manualWidths[col];
+				const needed = Math.ceil(textWidth) + chrome + CELL_BORDER_SLACK_PX;
+				group.createEl("col").style.width = `${clampColumnWidth(manual ?? needed, limits)}px`;
+			}
+
+			host.remove();
 		}
+
 		// The ghost column is a real, empty slot immediately after the last data
 		// column: the "+" lives in it, so the control hugs the last column the way
-		// "+ New row" hugs the last row. It carries a real width so it is part of
-		// the table's own width — an absolutely positioned strip does NOT extend
-		// the scrollable area, so at zero width the "+" gets clipped off the end
-		// of a grid that scrolls and becomes unreachable.
+		// "+ New row" hugs the last row.
 		group.createEl("col").style.width = `${GHOST_COLUMN_WIDTH}px`;
-		// The slack filler comes AFTER the ghost, so leftover width can never
-		// open a gap between the last column and the "+". Without any auto
-		// column the leftover is instead shared out between ALL columns, the
-		// row-number gutter included, which stretched the gutter to a quarter of
-		// the pane and pushed its numbers away from the left edge.
-		//
-		// Only in the full view: an embed must be able to shrink-wrap, and a
-		// filler that claims all the slack is exactly what prevents that. The
-		// guard has to be HERE as well as on the cells — a stray <col> with no
-		// matching cell still gets a real band under `table-layout: fixed`, so
-		// leaving it in gave the embed an empty column of dead space.
 		if (this.fillSlack) {
 			group.createEl("col");
 		}
-
-		range.detach();
-		host.remove();
 	}
 
 	/**
@@ -2055,8 +2192,8 @@ private clearSelection(): void {
 		// nothing changes SIZE afterwards (the grid is static until the user
 		// acts). Without this pass the bar keeps whatever width the early read
 		// produced, which is what left it spanning the pane instead of the grid.
-		if (typeof requestAnimationFrame === "function") {
-			requestAnimationFrame(pin);
+		if (typeof window.requestAnimationFrame === "function") {
+			window.requestAnimationFrame(pin);
 		}
 		this.addRowObserver?.disconnect();
 		if (typeof ResizeObserver !== "undefined") {
@@ -2114,8 +2251,8 @@ private clearSelection(): void {
 		pin();
 		// Same reason as anchorAddRow: the first read happens before the new
 		// table is laid out, and nothing resizes afterwards to correct it.
-		if (typeof requestAnimationFrame === "function") {
-			requestAnimationFrame(pin);
+		if (typeof window.requestAnimationFrame === "function") {
+			window.requestAnimationFrame(pin);
 		}
 		this.addColObserver?.disconnect();
 		if (typeof ResizeObserver !== "undefined") {
@@ -2208,9 +2345,9 @@ private clearSelection(): void {
 			const over = document.elementFromPoint(move.clientX, move.clientY);
 			const targetCell = over?.closest<HTMLElement>("th[data-col]");
 			if (targetCell) {
-				indicator = document.createElement("div");
-				indicator.addClass("super-csv-editor-col-drop-indicator");
-				targetCell.appendChild(indicator);
+				indicator = targetCell.createDiv({
+					cls: "super-csv-editor-col-drop-indicator",
+				});
 			}
 		};
 
@@ -2282,7 +2419,14 @@ private clearSelection(): void {
 			startWidth = Number.parseFloat(current?.style.width ?? "") || MIN_COLUMN_WIDTH;
 
 			const onMove = (move: MouseEvent): void => {
-				this.setColumnWidth(col, resizeWidth(startWidth, move.clientX - startX));
+				this.setColumnWidth(
+					col,
+					resizeWidth(
+						startWidth,
+						move.clientX - startX,
+						this.host.getColumnWidthLimits?.(),
+					),
+				);
 			};
 			const onUp = (): void => {
 				window.removeEventListener("mousemove", onMove);
@@ -2391,9 +2535,8 @@ private clearSelection(): void {
 		const next = focusedValue === "true" ? "false" : "true";
 		this.recordUndo();
 		this.table = setCell(this.table, this.focus.row, this.focus.col, next);
-		const cell = this.containerEl.querySelector<HTMLElement>(
-			`.super-csv-editor-cell[data-row="${this.focus.row}"][data-col="${this.focus.col}"]`,
-		);
+		this.dirty = true;
+		const cell = this.cellByKey.get(`${this.focus.row}:${this.focus.col}`);
 		if (cell) this.renderCell(cell, next);
 		this.host.onChange();
 		this.updateStatus();

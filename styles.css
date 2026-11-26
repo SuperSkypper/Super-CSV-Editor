@@ -117,7 +117,6 @@
 }
 
 .super-csv-editor-row.is-header {
-	position: -webkit-sticky;
 	position: sticky;
 	top: 0;
 	z-index: 2;
@@ -227,13 +226,13 @@ body.super-csv-editor-col-dragging {
  */
 .super-csv-editor-wikilink.is-unresolved {
 	color: var(--link-unresolved-color, var(--text-muted));
-	text-decoration: underline;
-	text-decoration-style: dotted;
-	text-decoration-color: var(--link-unresolved-decoration-color, var(--text-faint));
+	text-decoration: none;
+	border-bottom: 1px dotted var(--link-unresolved-decoration-color, var(--text-faint));
 }
 
 .super-csv-editor-wikilink.is-unresolved:hover {
-	text-decoration-style: solid;
+	text-decoration: none;
+	border-bottom-style: solid;
 }
 
 /*
@@ -805,5 +804,6 @@ body.super-csv-editor-col-dragging {
  * target that does not exist yet is distinguishable from one that does. */
 .super-csv-editor-links-unresolved {
 	color: var(--text-muted);
-	text-decoration: underline dotted;
+	text-decoration: none;
+	border-bottom: 1px dotted var(--text-faint);
 }

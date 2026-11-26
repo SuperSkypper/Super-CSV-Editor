@@ -7,8 +7,20 @@ import { displayText } from "./wikilinks.ts";
  * The view supplies the actual pixel measurement afterwards.
  */
 
-/** Narrower than this and a cell becomes unreadable. */
+/** Default minimum column width when no custom limit is configured. */
 export const MIN_COLUMN_WIDTH = 48;
+
+/** Uniform column width used when auto-fit is turned off. */
+export const DEFAULT_COLUMN_WIDTH = 150;
+
+export interface ColumnWidthLimits {
+	/** Whether columns auto-fit to their content width (up to `max`). */
+	autoFit: boolean;
+	/** Minimum column width in px. */
+	min: number;
+	/** Maximum column width in px. 0 means no limit. */
+	max: number;
+}
 
 /**
  * The width of the trailing ghost column that holds the "+" affordance.
@@ -38,16 +50,19 @@ export function widestTextsByColumn(table: CsvTable): string[] {
 	if (cols === 0) return [];
 
 	const widest: string[] = new Array<string>(cols).fill("");
+	const bestWidth: number[] = new Array<number>(cols).fill(0);
 	const consider = (raw: string, col: number): void => {
-		if (col >= cols) return;
+		if (!raw || col >= cols) return;
 		// Measure what the cell actually shows: `[[target|alias]]` renders as
 		// just `alias`, and ISO datetimes render reformatted. Width comes from
 		// the DOM later; here we only pick which text to measure.
 		const value = stripInvisible(displayText(raw));
-		const current = widest[col] ?? "";
-		// Strictly greater, so the header wins a tie. The real width comes from
-		// the DOM afterwards; this only chooses which text gets measured.
-		if (cellDisplayWidth(value) > cellDisplayWidth(current)) widest[col] = value;
+		const width = cellDisplayWidth(value);
+		// Strictly greater, so the header wins a tie.
+		if (width > (bestWidth[col] ?? 0)) {
+			bestWidth[col] = width;
+			widest[col] = value;
+		}
 	};
 
 	for (let col = 0; col < cols; col++) consider(table.headers[col] ?? "", col);
@@ -57,9 +72,52 @@ export function widestTextsByColumn(table: CsvTable): string[] {
 	return widest;
 }
 
-/** Applies a drag delta, refusing to collapse a column past the minimum. */
-export function resizeWidth(current: number, delta: number): number {
-	return Math.max(MIN_COLUMN_WIDTH, Math.round(current + delta));
+/** Single-column version of `widestTextsByColumn` for incremental edit checks. */
+export function widestTextInColumn(table: CsvTable, col: number): string {
+	let widest = "";
+	let bestWidth = 0;
+	const consider = (raw: string): void => {
+		if (!raw) return;
+		const value = stripInvisible(displayText(raw));
+		const width = cellDisplayWidth(value);
+		if (width > bestWidth) {
+			bestWidth = width;
+			widest = value;
+		}
+	};
+	consider(table.headers[col] ?? "");
+	for (const row of table.rows) consider(row[col] ?? "");
+	return widest;
+}
+
+/**
+ * Clamps a column width to the configured min/max bounds.
+ * `max <= 0` (or omitted) means no upper limit.
+ */
+export function clampColumnWidth(
+	width: number,
+	limits?: Partial<ColumnWidthLimits>,
+): number {
+	const min =
+		limits?.min !== undefined && Number.isFinite(limits.min) && limits.min >= 0
+			? Math.round(limits.min)
+			: MIN_COLUMN_WIDTH;
+	const rawMax = limits?.max ?? 0;
+	const rounded = Math.round(width);
+	if (Number.isFinite(rawMax) && rawMax > 0) {
+		const max = Math.max(min, Math.round(rawMax));
+		return Math.min(max, Math.max(min, rounded));
+	}
+	return Math.max(min, rounded);
+}
+
+/** Applies a drag delta, clamping to the configured min/max column width. */
+export function resizeWidth(
+	current: number,
+	delta: number,
+	limits?: Partial<ColumnWidthLimits>,
+): number {
+	return clampColumnWidth(current + delta, limits);
 }
 
 /**

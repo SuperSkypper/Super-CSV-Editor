@@ -91,6 +91,11 @@ export class CsvEmbedComponent extends Component {
 			const grid = new GridController(this.containerEl, this.plugin.app, {
 				onChange: () => this.scheduleSave(),
 				getSourcePath: () => this.file.path,
+				getColumnWidthLimits: () => ({
+					autoFit: this.plugin.settings.autoFitColumns,
+					min: this.plugin.settings.minColumnWidth,
+					max: this.plugin.settings.maxColumnWidth,
+				}),
 			});
 			grid.file = this.file;
 			this.containerEl.addClass("super-csv-editor-embed");
@@ -115,9 +120,11 @@ export class CsvEmbedComponent extends Component {
 			// and pushing the table down). Cells' own mousedown listeners run
 			// first — they are deeper in the tree — so selection and editing
 			// are unaffected.
-			this.containerEl.addEventListener("mousedown", guardEmbedMouse);
-			this.containerEl.addEventListener("click", (event) => event.stopPropagation());
-			this.containerEl.addEventListener("selectstart", guardEmbedSelectStart);
+			this.registerDomEvent(this.containerEl, "mousedown", guardEmbedMouse);
+			this.registerDomEvent(this.containerEl, "click", (event) =>
+				event.stopPropagation(),
+			);
+			this.registerDomEvent(this.containerEl, "selectstart", guardEmbedSelectStart);
 			grid.mount();
 			grid.loadText(
 				text,
@@ -142,9 +149,14 @@ export class CsvEmbedComponent extends Component {
 		grid.applyChrome(options);
 	}
 
-	/** Redraws from the in-memory table, e.g. when link resolution changed. */
+	/** Redraws from the in-memory table, e.g. when column width settings changed. */
 	refresh(): void {
 		this.grid?.refresh();
+	}
+
+	/** Updates wikilink resolved/unresolved styling in place without rebuilding the table. */
+	refreshLinks(): void {
+		this.grid?.refreshLinks();
 	}
 
 	/**

@@ -1,3 +1,20 @@
+# Changelog - v0.0.3
+
+## Features
+
+- Added **Columns** settings: **Auto-fit columns** toggle, **Minimum column width**, and **Maximum column width** (with live updates when finishing input).
+
+## Performance & memory
+
+- Filtering now toggles row visibility in place instead of rebuilding the table DOM on every keystroke.
+- Replaced per-cell, per-link, and per-checkbox event listeners with event delegation on `<tbody>`.
+- Incremental selection/focus painting, cached dirty flag, single-column width checks on edit, and debounced link-resolution updates.
+- Fixed observer and DOM listener leaks across re-renders and embed unloads.
+
+## Review & compatibility fixes
+
+- Resolved all Obsidian Auto Review lint, API compatibility, CSS, TypeScript strictness, and `moment` dependency warnings.
+
 # Changelog - v0.0.2
 
 ## Features

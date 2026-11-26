@@ -18,7 +18,7 @@ export class SuperCsvSettingTab extends PluginSettingTab {
 			.addButton((button) =>
 				button
 					.setButtonText("Restart plugin")
-					.setDestructive()
+					.setClass("mod-warning")
 					.onClick(async () => {
 						button.setDisabled(true);
 						await this.plugin.restartPlugin();
@@ -43,6 +43,83 @@ export class SuperCsvSettingTab extends PluginSettingTab {
 						await this.plugin.saveData(this.plugin.settings);
 					}),
 			);
+
+		new Setting(containerEl).setName("Columns").setHeading();
+
+		new Setting(containerEl)
+			.setName("Auto-fit columns")
+			.setDesc(
+				"Automatically size columns to fit their content, up to the maximum width limit. When off, columns use a fixed default width.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoFitColumns)
+					.onChange(async (value) => {
+						this.plugin.settings.autoFitColumns = value;
+						await this.plugin.saveData(this.plugin.settings);
+						this.plugin.applyColumnWidthSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Minimum column width")
+			.setDesc("Minimum column width in pixels. Applied when you finish editing.")
+			.addText((text) => {
+				text
+					.setPlaceholder("48")
+					.setValue(String(this.plugin.settings.minColumnWidth));
+				const commit = async (): Promise<void> => {
+					const trimmed = text.getValue().trim();
+					const parsed = trimmed === "" ? 0 : Number.parseInt(trimmed, 10);
+					if (Number.isFinite(parsed) && parsed >= 0) {
+						if (this.plugin.settings.minColumnWidth !== parsed) {
+							this.plugin.settings.minColumnWidth = parsed;
+							await this.plugin.saveData(this.plugin.settings);
+							this.plugin.applyColumnWidthSettings();
+						}
+						text.setValue(String(parsed));
+					} else {
+						text.setValue(String(this.plugin.settings.minColumnWidth));
+					}
+				};
+				text.inputEl.addEventListener("blur", () => void commit());
+				text.inputEl.addEventListener("keydown", (event) => {
+					if (event.key === "Enter") {
+						event.preventDefault();
+						void commit();
+					}
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("Maximum column width")
+			.setDesc("Maximum column width in pixels. Set to 0 for no limit. Applied when you finish editing.")
+			.addText((text) => {
+				text
+					.setPlaceholder("0")
+					.setValue(String(this.plugin.settings.maxColumnWidth));
+				const commit = async (): Promise<void> => {
+					const trimmed = text.getValue().trim();
+					const parsed = trimmed === "" ? 0 : Number.parseInt(trimmed, 10);
+					if (Number.isFinite(parsed) && parsed >= 0) {
+						if (this.plugin.settings.maxColumnWidth !== parsed) {
+							this.plugin.settings.maxColumnWidth = parsed;
+							await this.plugin.saveData(this.plugin.settings);
+							this.plugin.applyColumnWidthSettings();
+						}
+						text.setValue(String(parsed));
+					} else {
+						text.setValue(String(this.plugin.settings.maxColumnWidth));
+					}
+				};
+				text.inputEl.addEventListener("blur", () => void commit());
+				text.inputEl.addEventListener("keydown", (event) => {
+					if (event.key === "Enter") {
+						event.preventDefault();
+						void commit();
+					}
+				});
+			});
 
 		new Setting(containerEl).setName("Embeds").setHeading();
 

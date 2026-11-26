@@ -50,7 +50,8 @@ const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?!\d
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 export function formatDisplayValue(value: string): string {
-	if (!value) return value;
+	// Fast path: ISO dates/datetimes always start with "YYYY-" (length >= 10).
+	if (value.length < 10 || value.charCodeAt(4) !== 45) return value;
 	const match = ISO_DATETIME.exec(value);
 	if (match) {
 		const [, year, month, day, hour, minute, second] = match;
