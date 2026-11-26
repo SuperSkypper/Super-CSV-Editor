@@ -729,6 +729,28 @@ body.super-csv-editor-col-dragging {
 	min-width: 0;
 }
 
+.super-csv-editor-search-scope {
+	flex: 0 0 auto;
+	height: auto;
+	padding: 2px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.4;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.super-csv-editor-search-scope:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.super-csv-editor-search-scope.is-hidden {
+	display: none;
+}
+
 .super-csv-editor-search-count {
 	flex: 0 0 auto;
 	color: var(--text-muted);

@@ -46,10 +46,13 @@ export class CsvView extends FileView {
 	private searchButtonEl: HTMLElement | null = null;
 	private searchRowEl: HTMLElement | null = null;
 	private searchInputEl: HTMLInputElement | null = null;
+	private searchScopeEl: HTMLElement | null = null;
 	private searchCountEl: HTMLElement | null = null;
-private searchReplaceInputEl: HTMLInputElement | null = null;
+	private searchReplaceInputEl: HTMLInputElement | null = null;
 	/** Whether the search row is showing, so the button can toggle it. */
 	private searchOpen = false;
+	/** Column index the search is scoped to, or null for all columns. */
+	private searchColumn: number | null = null;
 	/**
 	 * The scope carrying Ctrl/Cmd+F. Obsidian's own Mod+F is a command on the
 	 * app scope, and `onTrigger` consumes the key for the first matching command
@@ -205,8 +208,10 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 		this.searchButtonEl = null;
 		this.searchRowEl = null;
 		this.searchInputEl = null;
+		this.searchScopeEl = null;
 		this.searchCountEl = null;
 		this.searchOpen = false;
+		this.searchColumn = null;
 	}
 
 	private ensureGrid(): void {
@@ -240,6 +245,7 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 				// list.
 			},
 			getSourcePath: () => this.file?.path,
+			onSearchColumn: (col: number) => this.openSearchInColumn(col),
 		});
 		this.grid.file = this.file;
 		this.grid.mount();
@@ -361,6 +367,18 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 		const row = this.contentEl.createDiv({ cls: "super-csv-editor-search is-hidden" });
 		const icon = row.createSpan({ cls: "super-csv-editor-search-icon" });
 		setIcon(icon, "search");
+		const scopeChip = row.createEl("button", {
+			cls: "super-csv-editor-search-scope is-hidden",
+		});
+		scopeChip.type = "button";
+		scopeChip.setAttribute("aria-label", "Clear column filter and search all columns");
+		scopeChip.addEventListener("click", () => {
+			this.searchColumn = null;
+			this.updateSearchScope();
+			this.applySearch();
+			this.searchInputEl?.focus();
+		});
+		this.searchScopeEl = scopeChip;
 		const input = row.createEl("input", { cls: "super-csv-editor-search-input" });
 		input.type = "text";
 		input.spellcheck = false;
@@ -396,7 +414,7 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 		replaceAllBtn.addEventListener("click", () => {
 			const query = this.searchInputEl?.value ?? "";
 			const replacement = replaceInput.value;
-			const n = this.grid?.replaceAll(query, replacement) ?? 0;
+			const n = this.grid?.replaceAll(query, replacement, this.searchColumn) ?? 0;
 			this.applySearch();
 			this.updateSearchCount();
 			new Notice(n === 0 ? "No matches" : `Replaced ${n}`);
@@ -485,8 +503,16 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 		// The button reads as "on" while the box is up, the way a toggled icon
 		// control does everywhere else in Obsidian.
 		this.searchButtonEl?.addClass("is-active");
+		this.updateSearchScope();
 		input.focus();
 		input.select();
+	}
+
+	/** Opens the search bar scoped to a single column. */
+	openSearchInColumn(col: number): void {
+		this.searchColumn = col;
+		this.openSearch();
+		this.applySearch();
 	}
 
 	/** Hides the search row and drops the filter, so the whole sheet returns. */
@@ -494,10 +520,12 @@ private searchReplaceInputEl: HTMLInputElement | null = null;
 		if (!this.searchRowEl) return;
 		this.searchRowEl.addClass("is-hidden");
 		this.searchOpen = false;
+		this.searchColumn = null;
 		this.searchButtonEl?.removeClass("is-active");
 		if (this.searchInputEl) this.searchInputEl.value = "";
-if (this.searchReplaceInputEl) this.searchReplaceInputEl.value = "";
-		this.grid?.setFilter("");
+		if (this.searchReplaceInputEl) this.searchReplaceInputEl.value = "";
+		this.updateSearchScope();
+		this.grid?.setFilter("", null);
 		this.updateSearchCount();
 		this.gridHost?.focus();
 	}
@@ -505,15 +533,35 @@ if (this.searchReplaceInputEl) this.searchReplaceInputEl.value = "";
 	/** Clears the box without stealing focus; used when a new file is loaded. */
 	private resetSearch(): void {
 		if (this.searchInputEl) this.searchInputEl.value = "";
-if (this.searchReplaceInputEl) this.searchReplaceInputEl.value = "";
+		if (this.searchReplaceInputEl) this.searchReplaceInputEl.value = "";
 		this.searchRowEl?.addClass("is-hidden");
 		this.searchOpen = false;
+		this.searchColumn = null;
 		this.searchButtonEl?.removeClass("is-active");
+		this.updateSearchScope();
 		this.updateSearchCount();
 	}
 
+	private updateSearchScope(): void {
+		const chip = this.searchScopeEl;
+		const input = this.searchInputEl;
+		if (this.searchColumn === null) {
+			chip?.addClass("is-hidden");
+			if (input) input.placeholder = "Find...";
+			return;
+		}
+		const header =
+			this.grid?.getTable().headers[this.searchColumn]?.trim() ||
+			`Column ${this.searchColumn + 1}`;
+		if (chip) {
+			chip.removeClass("is-hidden");
+			chip.setText(`${header} ×`);
+		}
+		if (input) input.placeholder = `Find in "${header}"...`;
+	}
+
 	private applySearch(): void {
-		this.grid?.setFilter(this.searchInputEl?.value ?? "");
+		this.grid?.setFilter(this.searchInputEl?.value ?? "", this.searchColumn);
 		this.updateSearchCount();
 	}
 

@@ -56,4 +56,22 @@ describe("matchingRowIndexes", () => {
 		const ragged = table([["Ada"], ["", "Grace"], []]);
 		assert.deepEqual(matchingRowIndexes(ragged, "grace"), [1]);
 	});
+
+	it("scopes matching to a single column when column index is provided", () => {
+		const mixed = table([
+			["London", "Ada", "1815"],
+			["Grace", "London", "1906"],
+			["Alan", "London", "1912"],
+		]);
+		assert.deepEqual(matchingRowIndexes(mixed, "london", 0), [0]);
+		assert.deepEqual(matchingRowIndexes(mixed, "london", 1), [1, 2]);
+		assert.deepEqual(matchingRowIndexes(mixed, "london", 2), []);
+	});
+
+	it("handles ragged rows and empty queries when scoped to a column", () => {
+		const ragged = table([["Ada"], ["", "Grace"], []]);
+		assert.deepEqual(matchingRowIndexes(ragged, "grace", 1), [1]);
+		assert.deepEqual(matchingRowIndexes(ragged, "grace", 0), []);
+		assert.deepEqual(matchingRowIndexes(ragged, "", 1), [0, 1, 2]);
+	});
 });

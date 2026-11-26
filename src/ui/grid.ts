@@ -141,6 +141,8 @@ export interface GridHost {
 	onChange(): void;
 	/** The note a wikilink click resolves against, as a vault path. */
 	getSourcePath(): string | undefined;
+	/** Opens the search bar scoped to a single column, when the host has one. */
+	onSearchColumn?(col: number): void;
 }
 
 /** Presentation options an embed can override. The full view uses none. */
@@ -298,6 +300,8 @@ export class GridController implements CsvSource {
 	 * embed never sets one, so it always draws every row.
 	 */
 	private filterQuery = "";
+	/** Column index the search filter is scoped to, or null for all columns. */
+	private filterColumn: number | null = null;
 	/** Data rows the active filter hides, recomputed on every render. */
 	private hiddenRows = new Set<number>();
 
@@ -428,6 +432,7 @@ export class GridController implements CsvSource {
 		// The search filter belongs to the file that was open, so a different
 		// file arrives unfiltered (the view also clears its own search box).
 		this.filterQuery = "";
+		this.filterColumn = null;
 		this.hiddenRows = new Set();
 		// Widths are per-column, so they cannot carry over to a different file.
 		this.manualWidths = {};
@@ -497,13 +502,15 @@ export class GridController implements CsvSource {
 	}
 
 	/**
-	 * Applies the search filter. An empty query shows every row again. Which
-	 * rows are hidden is recomputed by `render()`, so this only records the
-	 * query and rebuilds.
+	 * Applies the search filter. An empty query shows every row again. When
+	 * `column` is provided, only cells in that column are matched. Which rows
+	 * are hidden is recomputed by `render()`, so this only records the query
+	 * and rebuilds.
 	 */
-	setFilter(query: string): void {
-		if (this.filterQuery === query) return;
+	setFilter(query: string, column: number | null = null): void {
+		if (this.filterQuery === query && this.filterColumn === column) return;
 		this.filterQuery = query;
+		this.filterColumn = column;
 		this.renderOrDefer();
 	}
 
@@ -517,9 +524,11 @@ export class GridController implements CsvSource {
 	filterCounts(): { shown: number; total: number } {
 		const total = this.visibleRows();
 		if (this.filterQuery.trim() === "") return { shown: total, total };
-		const shown = matchingRowIndexes(this.table, this.filterQuery).filter(
-			(row) => row < total,
-		).length;
+		const shown = matchingRowIndexes(
+			this.table,
+			this.filterQuery,
+			this.filterColumn,
+		).filter((row) => row < total).length;
 		return { shown, total };
 	}
 
@@ -592,7 +601,7 @@ this.render(this.showStatus);
 	 * clipboard, the context menus, and the tests).
 	 */
 	getSelectedCells(): Focus[] {
-		return selectedCells(this.selection);
+		return selectedCells(this.selection, this.hiddenRows);
 	}
 
 	isDirty(): boolean {
@@ -631,7 +640,9 @@ this.render(this.showStatus);
 	private recomputeFilter(): void {
 		const hidden = new Set<number>();
 		if (this.filterQuery.trim() !== "") {
-			const shown = new Set(matchingRowIndexes(this.table, this.filterQuery));
+			const shown = new Set(
+				matchingRowIndexes(this.table, this.filterQuery, this.filterColumn),
+			);
 			const rows = this.visibleRows();
 			for (let row = 0; row < rows; row++) if (!shown.has(row)) hidden.add(row);
 		}
@@ -673,7 +684,7 @@ this.render(this.showStatus);
 	 * down the sheet instead of collapsing it to one cell.
 	 */
 	private fullRowSelected(): number | null {
-		const cells = selectedCells(this.selection);
+		const cells = this.getSelectedCells();
 		const cols = columnCount(this.table);
 		if (cols === 0 || cells.length !== cols) return null;
 		const row = cells[0]?.row;
@@ -683,8 +694,8 @@ this.render(this.showStatus);
 
 	/** Mirror of fullRowSelected for a single whole column. */
 	private fullColumnSelected(): number | null {
-		const cells = selectedCells(this.selection);
-		const rows = this.visibleRows();
+		const cells = this.getSelectedCells();
+		const rows = this.visibleRows() - this.hiddenRows.size;
 		if (rows === 0 || cells.length !== rows) return null;
 		const col = cells[0]?.col;
 		if (col === undefined) return null;
@@ -740,7 +751,7 @@ this.render(this.showStatus);
 
 	private paint(): void {
 		const chosen = new Set(
-			selectedCells(this.selection).map((c) => `${c.row}:${c.col}`),
+			this.getSelectedCells().map((c) => `${c.row}:${c.col}`),
 		);
 		// With a cleared selection nothing may keep the highlight: `is-focused`
 		// draws the accent outline, so it has to follow the selection too.
@@ -1304,7 +1315,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 			// Right-click acts on what is under the cursor when it is already part
 			// of the selection, and otherwise replaces the selection.
 			event.preventDefault();
-			if (!isSelected(this.selection, { row, col })) {
+			if (!isSelected(this.selection, { row, col }, this.hiddenRows)) {
 				this.setFocus({ row, col });
 			}
 			this.showCellMenu(event);
@@ -1314,7 +1325,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 	// ── Context menu ───────────────────────────────────────────────────────
 
 	private showCellMenu(event: MouseEvent): void {
-		const cells = selectedCells(this.selection);
+		const cells = this.getSelectedCells();
 		const one = cells.length === 1;
 		const label = one ? "cell" : `${cells.length} cells`;
 
@@ -1326,9 +1337,8 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 			(linkEl?.getAttribute("href") ?? "");
 		const hasLink = !!linkTarget && linkTarget !== "#";
 
-		const selected = selectedCells(this.selection);
-		const rowCount = new Set(selected.map((c) => c.row)).size;
-		const colCount = new Set(selected.map((c) => c.col)).size;
+		const rowCount = new Set(cells.map((c) => c.row)).size;
+		const colCount = new Set(cells.map((c) => c.col)).size;
 		const rowLabel = rowCount > 1 ? `Delete ${rowCount} rows` : "Delete row";
 		const colLabel = colCount > 1 ? `Delete ${colCount} columns` : "Delete column";
 
@@ -1460,7 +1470,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 				// Right-clicking a row number means "this row", so the delete
 				// targets it whether or not anything was selected. Without the
 				// selection the multi-row path would have nothing to work from.
-				const selectedRows = new Set(selectedCells(this.selection).map((c) => c.row));
+				const selectedRows = new Set(this.getSelectedCells().map((c) => c.row));
 				if (!selectedRows.has(row)) this.selectRow(row);
 				this.removeRow();
 			}),
@@ -1515,6 +1525,15 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 				.setIcon("arrow-down")
 				.onClick(() => this.sortBy(col, "desc")),
 		);
+		if (this.host.onSearchColumn) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle("Search on this column")
+					.setIcon("search")
+					.onClick(() => this.host.onSearchColumn?.(col)),
+			);
+		}
 		menu.addSeparator();
 		menu.addItem((item) =>
 			item
@@ -1530,7 +1549,7 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 				.onClick(() => {
 					// Same rule as the row menu: right-clicking a header means
 					// "this column", so select it when nothing else is selected.
-					const selectedCols = new Set(selectedCells(this.selection).map((c) => c.col));
+					const selectedCols = new Set(this.getSelectedCells().map((c) => c.col));
 					if (!selectedCols.has(col)) this.selectColumn(col);
 					this.removeColumn();
 				}),
@@ -1567,17 +1586,17 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 	}
 
 	private copySelection(): void {
-		const cells = selectedCells(this.selection);
+		const cells = this.getSelectedCells();
 		// A cleared selection must not put an empty string on the clipboard,
 		// clobbering whatever the user had copied elsewhere.
 		if (cells.length === 0) return;
-		void this.writeClipboard(copyToClipboard(this.table, cells));
+		void this.writeClipboard(copyToClipboard(this.table, cells, this.hiddenRows));
 	}
 
 	private cutSelection(): void {
-		const cells = selectedCells(this.selection);
+		const cells = this.getSelectedCells();
 		if (cells.length === 0) return;
-		const { copied, table } = cutToClipboard(this.table, cells);
+		const { copied, table } = cutToClipboard(this.table, cells, this.hiddenRows);
 		void this.writeClipboard(copied);
 		this.recordUndo();
 		this.table = table;
@@ -1630,7 +1649,11 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 		this.updateStatus();
 	}
 
-	replaceAll(search: string, replacement: string): number {
+	replaceAll(
+		search: string,
+		replacement: string,
+		column: number | null = null,
+	): number {
 	if (!search) return 0;
 	const pattern = new RegExp(
 		search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
@@ -1642,7 +1665,9 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 	for (let row = 0; row < out.rows.length; row++) {
 		const cells = out.rows[row];
 		if (!cells) continue;
-		for (let col = 0; col < cells.length; col++) {
+		const startCol = column !== null ? column : 0;
+		const endCol = column !== null ? Math.min(column + 1, cells.length) : cells.length;
+		for (let col = startCol; col < endCol; col++) {
 			const value = cells[col] ?? "";
 			const matches = value.match(pattern);
 			if (!matches) continue;
@@ -1651,13 +1676,15 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 			setCellInPlace(out, row, col, cells[col] ?? "");
 		}
 	}
-	// Headers too.
-	for (let col = 0; col < out.headers.length; col++) {
-		const value = out.headers[col] ?? "";
-		const matches = value.match(pattern);
-		if (!matches) continue;
-		count += matches.length;
-		out.headers[col] = value.replace(pattern, replacement);
+	// Headers too (only when searching across the whole sheet).
+	if (column === null) {
+		for (let col = 0; col < out.headers.length; col++) {
+			const value = out.headers[col] ?? "";
+			const matches = value.match(pattern);
+			if (!matches) continue;
+			count += matches.length;
+			out.headers[col] = value.replace(pattern, replacement);
+		}
 	}
 	this.table = out;
 	this.render(this.showStatus);
@@ -1666,9 +1693,10 @@ const needsRebuild = this.refreshPending || this.filterQuery.trim() !== "" || wi
 	return count;
 }
 private clearSelection(): void {
-	if (selectedCells(this.selection).length === 0) return;
+	const cells = this.getSelectedCells();
+	if (cells.length === 0) return;
 		this.recordUndo();
-		this.table = clearCells(this.table, selectedCells(this.selection));
+		this.table = clearCells(this.table, cells, this.hiddenRows);
 		this.render(this.showStatus);
 		this.setFocus(this.focus);
 		this.host.onChange();
@@ -1691,23 +1719,36 @@ private clearSelection(): void {
 			: parseClipboardGrid(text);
 		if (grid.length === 0) return;
 
-		const origin = this.focus;
+		const targets = this.getSelectedCells();
+		// Anchor multi-cell paste at the top-left of the visible selection (so
+		// dragging top-to-bottom pastes into the selected rows, not below them).
+		const origin =
+			targets.length > 0
+				? {
+						row: Math.min(...targets.map((c) => c.row)),
+						col: Math.min(...targets.map((c) => c.col)),
+					}
+				: this.focus;
 		this.recordUndo();
 
-		// A single-value clipboard fills EVERY selected cell, the way Excel
+		// A single-value clipboard fills EVERY selected visible cell, the way Excel
 		// repeats a copied value across a multi-cell selection. A multi-cell
-		// grid on the clipboard pastes from the focus anchor as before.
+		// grid on the clipboard pastes from the origin, skipping hidden rows.
 		if (grid.length === 1 && (grid[0]?.length ?? 0) === 1) {
 			const row = grid[0];
 			const value = row?.[0] ?? "";
-			const targets = selectedCells(this.selection);
-			// No explicit selection means the focus cell alone.
-			const cells = targets.length > 0 ? targets : [origin];
+			// No explicit selection means the focus cell alone (if visible).
+			const cells =
+				targets.length > 0
+					? targets
+					: this.hiddenRows.has(origin.row)
+						? []
+						: [origin];
 			let next = this.table;
 			for (const cell of cells) next = setCell(next, cell.row, cell.col, value);
 			this.table = next;
 		} else {
-			this.table = pasteGrid(this.table, grid, origin);
+			this.table = pasteGrid(this.table, grid, origin, this.hiddenRows);
 		}
 
 		const keepScroll = this.containerEl.querySelector<HTMLElement>(
@@ -2454,7 +2495,7 @@ private clearSelection(): void {
 	private updateStatus(): void {
 		if (!this.statusEl) return;
 		const ragged = this.table.raggedRows.length;
-		const count = selectedCells(this.selection).length;
+		const count = this.getSelectedCells().length;
 		this.statusEl.setText(
 			[
 				`${this.table.rows.length} rows`,
@@ -2494,9 +2535,12 @@ private clearSelection(): void {
 	}
 
 	fillSelection(direction: "down" | "right"): void {
-		const cells = selectedCells(this.selection);
+		const cells = this.getSelectedCells();
 		if (cells.length === 0) return;
-		this.mutate((t) => fillSelection(t, cells, direction), this.focus);
+		this.mutate(
+			(t) => fillSelection(t, cells, direction, this.hiddenRows),
+			this.focus,
+		);
 	}
 
 	/** Selects every data cell, as Ctrl+A does in a spreadsheet. */
@@ -2550,7 +2594,9 @@ private clearSelection(): void {
 		const last = { row, col: cols - 1 };
 		if (additive && this.selection) {
 			const band = rangeBetween(first, last);
-			const inBand = band.every((cell) => isSelected(this.selection, cell));
+			const inBand = band.every((cell) =>
+				isSelected(this.selection, cell, this.hiddenRows),
+			);
 			// Ctrl-clicking a row that is already fully selected removes it
 			// again, the way toggling a checkbox in a list works.
 			const extras = inBand
@@ -2571,11 +2617,23 @@ private clearSelection(): void {
 	selectColumn(col: number, additive = false): void {
 		const rows = this.visibleRows();
 		if (rows === 0) return;
-		const first = { row: 0, col };
-		const last = { row: rows - 1, col };
+		let firstRow = -1;
+		let lastRow = -1;
+		for (let r = 0; r < rows; r++) {
+			if (this.hiddenRows.has(r)) continue;
+			if (firstRow === -1) firstRow = r;
+			lastRow = r;
+		}
+		if (firstRow === -1) return;
+		const first = { row: firstRow, col };
+		const last = { row: lastRow, col };
 		if (additive && this.selection) {
-			const band = rangeBetween(first, last);
-			const inBand = band.every((cell) => isSelected(this.selection, cell));
+			const band = rangeBetween(first, last).filter(
+				(cell) => !this.hiddenRows.has(cell.row),
+			);
+			const inBand = band.every((cell) =>
+				isSelected(this.selection, cell, this.hiddenRows),
+			);
 			const extras = inBand
 				? this.selection.extras.filter((cell) => cell.col !== col)
 				: [...this.selection.extras, ...band];
@@ -2583,14 +2641,14 @@ private clearSelection(): void {
 		} else {
 			this.selection = { anchor: first, focus: last, extras: [] };
 		}
-		// Mirror of selectRow: the caret sits on the first cell of the column
-		// so selecting a column never scrolls the grid down to the last row.
+		// Mirror of selectRow: the caret sits on the first visible cell of the
+		// column so selecting a column never scrolls the grid down to the last row.
 		this.focus = additive ? this.focus : first;
 		this.paint();
 	}
 
 	removeRow(): void {
-		const selected = selectedCells(this.selection);
+		const selected = this.getSelectedCells();
 		const rows =
 			selected.length > 0
 				? [...new Set(selected.map((c) => c.row))]
@@ -2636,7 +2694,7 @@ private clearSelection(): void {
 	}
 
 	removeColumn(): void {
-		const selected = selectedCells(this.selection);
+		const selected = this.getSelectedCells();
 		const cols =
 			selected.length > 0
 				? [...new Set(selected.map((c) => c.col))]

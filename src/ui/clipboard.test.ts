@@ -9,6 +9,8 @@ import {
 	serializeSelection,
 	parseClipboardGrid,
 	canPasteGrid,
+	pasteGrid,
+	fillSelection,
 } from "./clipboard.ts";
 import type { CsvTable } from "../parser/csv.ts";
 import type { Focus } from "./navigation.ts";
@@ -280,5 +282,127 @@ describe("cutToClipboard", () => {
 	it("does not mutate the original table", () => {
 		cutToClipboard(grid, [{ row: 0, col: 0 }]);
 		assert.deepEqual(grid.rows[0], ["1", "2", "3"]);
+	});
+});
+
+describe("clipboard operations with hiddenRows (active filter)", () => {
+	const filtered = tableOf(["tag", "val", "dst"], [
+		["A", "1", "d0"],
+		["B", "2", "d1"],
+		["A", "3", "d2"],
+		["C", "4", "d3"],
+		["A", "5", "d4"],
+	]);
+	const hidden = new Set([1, 3]);
+
+	it("serializeSelection skips hidden rows inside the bounding box", () => {
+		const cells: Focus[] = [
+			{ row: 0, col: 1 },
+			{ row: 2, col: 1 },
+			{ row: 4, col: 1 },
+		];
+		assert.equal(serializeSelection(filtered, cells, hidden), "1\n3\n5");
+	});
+
+	it("copyToClipboard omits hidden rows from the Markdown table", () => {
+		const cells: Focus[] = [
+			{ row: 0, col: 1 },
+			{ row: 2, col: 1 },
+			{ row: 4, col: 1 },
+		];
+		assert.equal(
+			copyToClipboard(filtered, cells, hidden),
+			"| 1 |\n| --- |\n| 3 |\n| 5 |",
+		);
+	});
+
+	it("cutToClipboard copies and clears only visible rows", () => {
+		const cells: Focus[] = [
+			{ row: 0, col: 1 },
+			{ row: 1, col: 1 },
+			{ row: 2, col: 1 },
+		];
+		const { copied, table } = cutToClipboard(filtered, cells, hidden);
+		assert.equal(copied, "| 1 |\n| --- |\n| 3 |");
+		assert.equal(table.rows[0]?.[1], "");
+		assert.equal(table.rows[1]?.[1], "2"); // hidden row untouched
+		assert.equal(table.rows[2]?.[1], "");
+	});
+
+	it("pasteGrid writes only onto visible rows, leaving hidden rows untouched", () => {
+		const pasted = pasteGrid(
+			filtered,
+			[["X"], ["Y"], ["Z"]],
+			{ row: 0, col: 2 },
+			hidden,
+		);
+		assert.deepEqual(
+			pasted.rows.map((r) => r[2]),
+			["X", "d1", "Y", "d3", "Z"],
+		);
+	});
+
+	it("pasteGrid appends new rows when the clipboard has more rows than visible targets", () => {
+		const pasted = pasteGrid(
+			filtered,
+			[["X"], ["Y"], ["Z"], ["W"]],
+			{ row: 0, col: 2 },
+			hidden,
+		);
+		assert.equal(pasted.rows.length, 6);
+		assert.deepEqual(
+			pasted.rows.map((r) => r[2]),
+			["X", "d1", "Y", "d3", "Z", "W"],
+		);
+	});
+
+	it("batch copy and paste round-trips across filtered rows without touching hidden rows", () => {
+		const copied = copyToClipboard(
+			filtered,
+			[{ row: 0, col: 1 }, { row: 2, col: 1 }, { row: 4, col: 1 }],
+			hidden,
+		);
+		const parsed = parseMarkdownTable(copied);
+		const pasted = pasteGrid(filtered, parsed, { row: 0, col: 2 }, hidden);
+		assert.deepEqual(
+			pasted.rows.map((r) => r[2]),
+			["1", "d1", "3", "d3", "5"],
+		);
+	});
+
+	it("fillSelection down and right skip hidden rows", () => {
+		const down = fillSelection(
+			filtered,
+			[{ row: 0, col: 1 }, { row: 4, col: 1 }],
+			"down",
+			hidden,
+		);
+		assert.deepEqual(
+			down.rows.map((r) => r[1]),
+			["1", "2", "1", "4", "1"],
+		);
+
+		const right = fillSelection(
+			filtered,
+			[{ row: 0, col: 1 }, { row: 4, col: 2 }],
+			"right",
+			hidden,
+		);
+		assert.deepEqual(
+			right.rows.map((r) => r[2]),
+			["1", "d1", "3", "d3", "5"],
+		);
+	});
+
+	it("clearCells ignores hidden rows even if passed in the cell list", () => {
+		const out = clearCells(
+			filtered,
+			[{ row: 0, col: 1 }, { row: 1, col: 1 }, { row: 2, col: 1 }],
+			hidden,
+		);
+		assert.deepEqual(
+			out.rows.map((r) => r[1]),
+			["", "2", "", "4", "5"],
+		);
 	});
 });

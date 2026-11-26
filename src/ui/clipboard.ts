@@ -35,17 +35,37 @@ function boundsOf(cells: Focus[]): Rect | null {
 	return { top, bottom, left, right };
 }
 
+function visibleRowsInRect(
+	rect: Rect,
+	hiddenRows?: ReadonlySet<number>,
+): number[] {
+	const rows: number[] = [];
+	for (let row = rect.top; row <= rect.bottom; row++) {
+		if (hiddenRows?.has(row)) continue;
+		rows.push(row);
+	}
+	return rows;
+}
+
 /**
  * Renders the selection as TSV.
  *
  * A sparse selection still produces a full rectangle with empty gaps, so the
  * pasted block lines up with the columns it came from instead of shifting left.
+ * Rows hidden by an active filter are omitted so copy never leaks filtered-out
+ * records into the clipboard.
  */
-export function serializeSelection(table: CsvTable, cells: Focus[]): string {
+export function serializeSelection(
+	table: CsvTable,
+	cells: Focus[],
+	hiddenRows?: ReadonlySet<number>,
+): string {
 	const rect = boundsOf(cells);
 	if (!rect) return "";
+	const rows = visibleRowsInRect(rect, hiddenRows);
+	if (rows.length === 0) return "";
 	const lines: string[] = [];
-	for (let row = rect.top; row <= rect.bottom; row++) {
+	for (const row of rows) {
 		const values: string[] = [];
 		for (let col = rect.left; col <= rect.right; col++) {
 			values.push(table.rows[row]?.[col] ?? "");
@@ -120,24 +140,32 @@ export function fillSelection(
 	table: CsvTable,
 	cells: Focus[],
 	direction: "down" | "right",
+	hiddenRows?: ReadonlySet<number>,
 ): CsvTable {
-	const rect = boundsOf(cells);
+	const visibleCells = hiddenRows
+		? cells.filter((cell) => !hiddenRows.has(cell.row))
+		: cells;
+	const rect = boundsOf(visibleCells);
 	if (!rect) return table;
+	const rows = visibleRowsInRect(rect, hiddenRows);
+	if (rows.length === 0) return table;
 	// Clone once and write in place; `setCell` would deep-copy the whole table
 	// on every single cell, making a large fill O(cells × table).
 	const out = clone(table);
 	if (direction === "down") {
-		// One write per column per row: the source is always the TOP row of the
-		// selection, so every row ends up identical — no cascading carry-over.
+		// One write per column per row: the source is always the TOP visible row
+		// of the selection, so every visible row ends up identical — no cascading
+		// carry-over and no writes into hidden rows.
+		const topRow = rows[0]!;
 		for (let col = rect.left; col <= rect.right; col++) {
-			const source = table.rows[rect.top]?.[col] ?? "";
-			for (let row = rect.top + 1; row <= rect.bottom; row++) {
-				setCellInPlace(out, row, col, source);
+			const source = table.rows[topRow]?.[col] ?? "";
+			for (let i = 1; i < rows.length; i++) {
+				setCellInPlace(out, rows[i]!, col, source);
 			}
 		}
 		return reindexRagged(out, out.headers.length);
 	}
-	for (let row = rect.top; row <= rect.bottom; row++) {
+	for (const row of rows) {
 		const source = table.rows[row]?.[rect.left] ?? "";
 		for (let col = rect.left + 1; col <= rect.right; col++) {
 			setCellInPlace(out, row, col, source);
@@ -146,10 +174,15 @@ export function fillSelection(
 	return reindexRagged(out, out.headers.length);
 }
 
-/** Blanks every selected cell, returning a new table. */
-export function clearCells(table: CsvTable, cells: Focus[]): CsvTable {
+/** Blanks every selected visible cell, returning a new table. */
+export function clearCells(
+	table: CsvTable,
+	cells: Focus[],
+	hiddenRows?: ReadonlySet<number>,
+): CsvTable {
 	const out = clone(table);
 	for (const cell of cells) {
+		if (hiddenRows?.has(cell.row)) continue;
 		if (cell.row < 0 || cell.row >= out.rows.length) continue;
 		if (out.rows[cell.row]?.[cell.col] === "") continue;
 		setCellInPlace(out, cell.row, cell.col, "");
@@ -182,15 +215,20 @@ function renderMarkdownRows(rows: string[][]): string[] {
  * row is used as the header — which is what a pasted table looks like when
  * the top row of the selection is a header.
  */
-export function serializeSelectionAsMarkdown(table: CsvTable, cells: Focus[]): string {
+export function serializeSelectionAsMarkdown(
+	table: CsvTable,
+	cells: Focus[],
+	hiddenRows?: ReadonlySet<number>,
+): string {
 	const rect = boundsOf(cells);
 	if (!rect) return "";
+	const rows = visibleRowsInRect(rect, hiddenRows);
+	if (rows.length === 0) return "";
 	const lines: string[] = [];
-	const rowCount = rect.bottom - rect.top + 1;
 	const colCount = rect.right - rect.left + 1;
-	for (let r = 0; r < rowCount; r++) {
+	for (let r = 0; r < rows.length; r++) {
 		const values: string[] = [];
-		const row = rect.top + r;
+		const row = rows[r]!;
 		for (let c = 0; c < colCount; c++) {
 			values.push(table.rows[row]?.[rect.left + c] ?? "");
 		}
@@ -257,25 +295,37 @@ export function parseMarkdownTable(text: string): string[][] {
 	return rows;
 }
 
-export function copyToClipboard(table: CsvTable, cells: Focus[]): string {
-	return serializeSelectionAsMarkdown(table, cells);
+export function copyToClipboard(
+	table: CsvTable,
+	cells: Focus[],
+	hiddenRows?: ReadonlySet<number>,
+): string {
+	return serializeSelectionAsMarkdown(table, cells, hiddenRows);
 }
 
 export function cutToClipboard(
 	table: CsvTable,
 	cells: Focus[],
+	hiddenRows?: ReadonlySet<number>,
 ): { copied: string; table: CsvTable } {
 	// Same format as copy: the two used to disagree (cut produced TSV while copy
 	// produced a Markdown table), so a cut-and-paste into a note lost the table.
+	const visibleCells = hiddenRows
+		? cells.filter((cell) => !hiddenRows.has(cell.row))
+		: cells;
 	return {
-		copied: serializeSelectionAsMarkdown(table, cells),
-		table: clearCells(table, cells),
+		copied: serializeSelectionAsMarkdown(table, visibleCells, hiddenRows),
+		table: clearCells(table, visibleCells, hiddenRows),
 	};
 }
 
 /**
  * Writes a pasted grid with its top-left corner at `origin`, GROWING the table
  * when the paste runs past the last row or column — the way Excel does.
+ *
+ * When a filter is active (`hiddenRows`), pasted rows land only on visible rows
+ * starting at `origin.row` so hidden records are never overwritten. Any rows
+ * left over after the last visible row are appended to the end of the table.
  *
  * There are no formulas: every pasted cell is a literal value, so a paste that
  * extends the grid just creates blank rows/columns to hold it. `setCellInPlace`
@@ -285,6 +335,7 @@ export function pasteGrid(
 	table: CsvTable,
 	grid: string[][],
 	origin: Focus,
+	hiddenRows?: ReadonlySet<number>,
 ): CsvTable {
 	// One clone for the whole paste; `setCell` would copy the table per cell.
 	const out = clone(table);
@@ -292,15 +343,23 @@ export function pasteGrid(
 		0,
 		...grid.map((row) => row?.length ?? 0),
 	);
-	const neededRows = origin.row + grid.length;
 	const neededCols = origin.col + width;
 
-	// Rows first: a pasted block taller than the table appends blank rows.
-	if (neededRows > out.rows.length) {
-		while (out.rows.length < neededRows) {
+	// Resolve target row indices first, skipping rows hidden by an active filter.
+	// Once past the existing table, append blank rows as before.
+	const targetRows: number[] = [];
+	let candidate = origin.row;
+	for (let row = 0; row < grid.length; row++) {
+		while (candidate < out.rows.length && hiddenRows?.has(candidate)) {
+			candidate++;
+		}
+		if (candidate >= out.rows.length) {
 			out.rows.push(blankRow(columnCount(out)));
 		}
+		targetRows.push(candidate);
+		candidate++;
 	}
+
 	// Then columns: the header AND every row grow together, so the grid stays
 	// rectangular while it grows.
 	if (neededCols > out.headers.length) {
@@ -313,7 +372,7 @@ export function pasteGrid(
 	}
 
 	for (let row = 0; row < grid.length; row++) {
-		const targetRow = origin.row + row;
+		const targetRow = targetRows[row]!;
 		const values = grid[row];
 		for (let col = 0; col < (values?.length ?? 0); col++) {
 			setCellInPlace(out, targetRow, origin.col + col, values?.[col] ?? "");

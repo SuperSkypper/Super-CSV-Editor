@@ -153,3 +153,34 @@ describe("isSelected", () => {
 		assert.equal(isSelected(sel, { row: 9, col: 9 }), true);
 	});
 });
+
+describe("selectedCells with hiddenRows", () => {
+	it("excludes filtered-out rows from a dragged rectangle", () => {
+		const sel: Selection = {
+			anchor: { row: 0, col: 0 },
+			focus: { row: 4, col: 0 },
+			extras: [],
+		};
+		const hidden = new Set([1, 3]);
+		assert.deepEqual(selectedCells(sel, hidden), [
+			{ row: 0, col: 0 },
+			{ row: 2, col: 0 },
+			{ row: 4, col: 0 },
+		]);
+	});
+
+	it("excludes hidden rows from detached extras as well", () => {
+		const sel: Selection = {
+			anchor: { row: 0, col: 0 },
+			focus: { row: 0, col: 0 },
+			extras: [{ row: 1, col: 1 }, { row: 2, col: 1 }],
+		};
+		const hidden = new Set([1]);
+		assert.deepEqual(selectedCells(sel, hidden), [
+			{ row: 0, col: 0 },
+			{ row: 2, col: 1 },
+		]);
+		assert.equal(isSelected(sel, { row: 1, col: 1 }, hidden), false);
+		assert.equal(isSelected(sel, { row: 2, col: 1 }, hidden), true);
+	});
+});

@@ -56,7 +56,10 @@ export function toggleExtra(selection: Selection, target: Focus): Selection {
 }
 
 /** Rectangle plus detached cells, de-duplicated. Null selects nothing. */
-export function selectedCells(selection: Selection | null): Focus[] {
+export function selectedCells(
+	selection: Selection | null,
+	hiddenRows?: ReadonlySet<number>,
+): Focus[] {
 	if (selection === null) return [];
 	const seen = new Set<string>();
 	const cells: Focus[] = [];
@@ -64,6 +67,7 @@ export function selectedCells(selection: Selection | null): Focus[] {
 		...rangeBetween(selection.anchor, selection.focus),
 		...selection.extras,
 	]) {
+		if (hiddenRows?.has(cell.row)) continue;
 		const key = `${cell.row}:${cell.col}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -72,8 +76,12 @@ export function selectedCells(selection: Selection | null): Focus[] {
 	return cells;
 }
 
-export function isSelected(selection: Selection | null, cell: Focus): boolean {
-	return selectedCells(selection).some(
+export function isSelected(
+	selection: Selection | null,
+	cell: Focus,
+	hiddenRows?: ReadonlySet<number>,
+): boolean {
+	return selectedCells(selection, hiddenRows).some(
 		(c) => c.row === cell.row && c.col === cell.col,
 	);
 }
